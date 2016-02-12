@@ -1,14 +1,20 @@
 package main
 
 import (
-    "fmt"
 	"github.com/wayf-dk/gosaml"
+	"github.com/wayf-dk/lMDQ"
 	"log"
 )
 
+const (
+    HUB_OP_MDQ = "/home/mz/hub_ops.mddb"
+)
+
 var (
-    _ = log.Println
-    sourceResponse = gosaml.NewXp([]byte(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+	_              = log.Println
+   	hub_op *lMDQ.MDQ
+
+	sourceResponse = gosaml.NewXp([]byte(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
                 xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
                 ID="_336333b557cf99d44124c2c2b02b1cc2d4efb4fe2c"
                 Version="2.0"
@@ -17,7 +23,7 @@ var (
                 InResponseTo="_be2b06534490f9b658487041f1f011348c2834f8aa"
                 >
     <saml:Issuer>https://wayf.ait.dtu.dk/saml2/idp/metadata.php</saml:Issuer>
-    <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+    <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">"
         <ds:SignedInfo>
             <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#" />
             <ds:SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1" />
@@ -139,10 +145,15 @@ var (
                             >
                 <saml:AttributeValue xsi:type="xs:string">staff</saml:AttributeValue>
             </saml:Attribute>
+            <saml:Attribute Name="eduPersonScopedAffiliation"
+                            NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"
+                            >
+                <saml:AttributeValue xsi:type="xs:string">staff@just.testing.dtu.dk</saml:AttributeValue>
+            </saml:Attribute>
             <saml:Attribute Name="schacPersonalUniqueID"
                             NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"
                             >
-                <saml:AttributeValue xsi:type="xs:string">urn:mace:terena.org:schac:personalUniqueID:dk:CPR:2408590763</saml:AttributeValue>
+                <saml:AttributeValue xsi:type="xs:string">urn:mace:terena.org:schac:personalUniqueID:dk:CPR:2408586234</saml:AttributeValue>
             </saml:Attribute>
             <saml:Attribute Name="eduPersonAssurance"
                             NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"
@@ -158,123 +169,17 @@ var (
     </saml:Assertion>
 </samlp:Response>
 `))
-
-wayfrequestedattributes = []byte(`<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://wayf.wayf.dk">
-  <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:1.1:protocol urn:oasis:names:tc:SAML:2.0:protocol">
-    <md:AttributeConsumingService index="0">
-      <md:RequestedAttribute Name="sn" singular="true" must="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="gn" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="cn" singular="true" must="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="eduPersonPrincipalName" singular="true" mandatory="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="mail" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="eduPersonPrimaryAffiliation" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="organizationName" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="eduPersonAssurance" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="schacPersonalUniqueID" singular="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="schacCountryOfCitizenship" singular="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="eduPersonScopedAffiliation" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="preferredLanguage" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="eduPersonEntitlement" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="norEduPersonLIN" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-    </md:AttributeConsumingService>
-  </md:SPSSODescriptor>
-</md:EntityDescriptor>`)
-
 )
 
 
-// func ExamplewayfAttributeHandler(sourceresponse, md *gosaml.Xp) (err error) {
 func ExampleWayfAttributeHandler() {
-// We need som extra attributes @singular @mandatory @must here - until available in regular md we need to hardcode it here
-var wayfrequestedattributes = []byte(`<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://wayf.wayf.dk">
-  <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:1.1:protocol urn:oasis:names:tc:SAML:2.0:protocol">
-    <md:AttributeConsumingService index="0">
-      <md:RequestedAttribute Name="sn" singular="true" must="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="gn" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="cn" singular="true" must="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="eduPersonPrincipalName" singular="true" mandatory="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="mail" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="eduPersonPrimaryAffiliation" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="organizationName" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="eduPersonAssurance" singular="true" must="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic" isRequired="true"/>
-      <md:RequestedAttribute Name="schacPersonalUniqueID" singular="true" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="schacCountryOfCitizenship" singular="true"  NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="eduPersonScopedAffiliation" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="preferredLanguage" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="eduPersonEntitlement" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-      <md:RequestedAttribute Name="norEduPersonLIN" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic"/>
-    </md:AttributeConsumingService>
-  </md:SPSSODescriptor>
-</md:EntityDescriptor>`)
+	hub_md := gosaml.NewXp(wayfrequestedattributes)
+	idp := sourceResponse.Query1(nil, "/samlp:Response/saml:Issuer")
 
-	sourceAttributes := sourceResponse.Query(nil, `//saml:AttributeStatement`)[0]
-	response := gosaml.NewXp([]byte(`<saml:AttributeStatement xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"></saml:AttributeStatement>`))
-	destinationAttributes := response.Query(nil, "//saml:AttributeStatement")[0]
-
-    hubMd := gosaml.NewXp(wayfrequestedattributes)
-
-	requestedAttributes := hubMd.Query(nil, `//md:RequestedAttribute`) // [@isRequired='true' or @isRequired='1']`)
-	for _, requestedAttribute := range requestedAttributes {
-		name := requestedAttribute.GetAttr("Name")
-		nameFormat := requestedAttribute.GetAttr("NameFormat")
-		//mandatory := hubMd.QueryBool(requestedAttribute, "@mandatory")
-		//must := hubMd.QueryBool(requestedAttribute, "@must")
-		//singular := hubMd.QueryBool(requestedAttribute, "@singular")
-
-		attributes := sourceResponse.Query(sourceAttributes, `saml:Attribute[@Name="`+name+`" and @NameFormat="`+nameFormat+`"]`)
-		for _, attribute := range attributes {
-			newAttribute := destinationAttributes.AddChild(sourceResponse.CopyNode(attribute, 2))
-			allowedValues := hubMd.Query(requestedAttribute, `saml:AttributeValue`)
-			allowedValuesMap := make(map[string]bool)
-			for _, value := range allowedValues {
-				allowedValuesMap[hubMd.NodeGetContent(value)] = true
-			}
-			for _, valueNode := range sourceResponse.Query(attribute, `saml:AttributeValue`) {
-				value := sourceResponse.NodeGetContent(valueNode)
-				if len(allowedValues) == 0 || allowedValuesMap[value] {
-				    newAttribute.AddChild(sourceResponse.CopyNode(valueNode, 1))
-				}
-			}
-		}
-	}
-	fmt.Println(response.Pp())
-    // Output:
-    // <?xml version="1.0"?>
-    // <saml:AttributeStatement xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="sn" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">Petersen</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="gn" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">Mads Freek</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="cn" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">Mads Freek Petersen</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="eduPersonPrincipalName" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">madpe@dtu.dk</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="mail" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">madpe@dtu.dk</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="eduPersonPrimaryAffiliation" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">staff</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="organizationName" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">Danmarks Tekniske Universitet</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="eduPersonAssurance" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">2</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="schacPersonalUniqueID" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">urn:mace:terena.org:schac:personalUniqueID:dk:CPR:2408590763</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="preferredLanguage" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">da-DK</saml:AttributeValue>
-    //   </saml:Attribute>
-    //   <saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" Name="eduPersonEntitlement" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
-    //     <saml:AttributeValue xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">urn:mace:terena.org:tcs:escience-user</saml:AttributeValue>
-    //   </saml:Attribute>
-    // </saml:AttributeStatement>
-
+	hub_op , _ := new(lMDQ.MDQ).Open(HUB_OP_MDQ)
+	idp_md, _, _ := hub_op.MDQ(idp)
+    WayfAttributeHandler(idp_md, hub_md, sourceResponse)
+    log.Println(sourceResponse.Pp())
+    // output: hi
 }
 
