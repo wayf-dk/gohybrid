@@ -19,16 +19,21 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	//    "github.com/spacemonkeygo/openssl"
 	"github.com/wayf-dk/gosaml"
 	"github.com/wayf-dk/lMDQ"
 	"html/template"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -70,8 +75,8 @@ var (
 		"HYBRID_HUB":           "https://wayf.wayf.dk",
 		"HYBRID_DISCOVERY":     "/DS/ds.html?",
 		"HYBRID_INTERFACE":     "0.0.0.0:443",
-		"HYBRID_HTTPS_KEY":     "src/github.com/wayf-dk/gohybrid/key.pem",
-		"HYBRID_HTTPS_CERT":    "src/github.com/wayf-dk/gohybrid/cert.pem",
+		"HYBRID_HTTPS_KEY":     "/etc/ssl/wayf/private/wildcard.test.lan.key",
+		"HYBRID_HTTPS_CERT":    "/etc/ssl/wayf/certs/wildcard.test.lan.pem",
 		"HYBRID_PUBLIC":        "src/github.com/wayf-dk/gohybrid/public",
 		"HYBRID_PUBLIC_PREFIX": "/DS/",
 		"HYBRID_SSO_SERVICE":   "/saml2/idp/SSOService.php",
@@ -89,7 +94,7 @@ var (
 	elementsToSign = []string{"/samlp:Response/saml:Assertion"}
 
 	hub, hub_ops, edugain *lMDQ.MDQ
-	hubmd *gosaml.Xp
+	hubmd                 *gosaml.Xp
 
 	Wayfrequestedattributes = []byte(`<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://wayf.wayf.dk">
   <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:1.1:protocol urn:oasis:names:tc:SAML:2.0:protocol">
@@ -128,6 +133,20 @@ func main() {
 	//		log.SetOutput(logwriter)
 	//	}
 
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	signal.Notify(c, syscall.SIGTERM)
+	go func() {
+		<-c
+		f, err := os.Create("hybrid.pprof")
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.WriteHeapProfile(f)
+		f.Close()
+		os.Exit(1)
+	}()
+
 	var err error
 	if hub, err = lMDQ.Open("/home/mz/test_hub.mddb"); err != nil {
 		log.Println(err)
@@ -155,6 +174,8 @@ func main() {
 
 	log.Println("listening on ", config["HYBRID_INTERFACE"])
 	err = http.ListenAndServeTLS(config["HYBRID_INTERFACE"], config["HYBRID_HTTPS_CERT"], config["HYBRID_HTTPS_KEY"], nil)
+	//err = openssl.ListenAndServeTLS(config["HYBRID_INTERFACE"], config["HYBRID_HTTPS_CERT"], config["HYBRID_HTTPS_KEY"], nil)
+
 	if err != nil {
 		log.Printf("main(): %s\n", err)
 	}
@@ -253,19 +274,19 @@ func acsService(w http.ResponseWriter, r *http.Request) (err error) {
 	hub_md := gosaml.NewXp(Wayfrequestedattributes)
 	err = WayfAttributeHandler(idp_md, hub_md, sp_md, response)
 	if err != nil {
-	    return
+		return
 	}
 
 	birkmd, err := edugain.MDQ(request.Query1(nil, "@Destination"))
-    nameid := response.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
+	nameid := response.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
 	// respect nameID in req, give persistent id + all computed attributes + nameformat conversion
 	nameidformat := sp_md.Query1(nil, "./md:SPSSODescriptor/md:NameIDFormat")
-	if  nameidformat == persistent {
-        response.QueryDashP(nameid, "@Format", persistent, nil)
-        eptid := response.Query1(nil, `./saml:Assertion/saml:AttributeStatement/saml:Attribute[@FriendlyName="eduPersonTargetedID"]/saml:AttributeValue`)
-        response.QueryDashP(nameid, ".", eptid, nil)
+	if nameidformat == persistent {
+		response.QueryDashP(nameid, "@Format", persistent, nil)
+		eptid := response.Query1(nil, `./saml:Assertion/saml:AttributeStatement/saml:Attribute[@FriendlyName="eduPersonTargetedID"]/saml:AttributeValue`)
+		response.QueryDashP(nameid, ".", eptid, nil)
 	} else if nameidformat == transient {
-        response.QueryDashP(nameid, ".", gosaml.Id(), nil)
+		response.QueryDashP(nameid, ".", gosaml.Id(), nil)
 	}
 
 	newresponse := gosaml.NewResponse(stdtiming.Refresh(), birkmd, sp_md, request, response)
@@ -336,13 +357,13 @@ func kribService(w http.ResponseWriter, r *http.Request) (err error) {
 }
 
 func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx := make(map[string]string)
-	contextmutex.Lock()
-	context[r] = ctx
-	contextmutex.Unlock()
+	/*	ctx := make(map[string]string)
+		contextmutex.Lock()
+		context[r] = ctx
+		contextmutex.Unlock()
+		w.Header().Set("content-Security-Policy", "referrer no-referrer;")
+	*/
 	starttime := time.Now()
-	w.Header().Set("content-Security-Policy", "referrer no-referrer;")
-
 	err := fn(w, r)
 
 	status := 200
@@ -350,14 +371,15 @@ func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status = 500
 		http.Error(w, err.Error(), status)
 	} else {
-	    err = fmt.Errorf("OK")
+		err = fmt.Errorf("OK")
 	}
 
 	log.Printf("%s %s %s %+v %1.3f %d %s", r.RemoteAddr, r.Method, r.Host, r.URL, time.Since(starttime).Seconds(), status, err)
 
-	contextmutex.Lock()
-	delete(context, r)
-	contextmutex.Unlock()
+	/*	contextmutex.Lock()
+		delete(context, r)
+		contextmutex.Unlock()
+	*/
 }
 
 func WayfAttributeHandler(idp_md, hub_md, sp_md, response *gosaml.Xp) (err error) {
@@ -376,7 +398,7 @@ func WayfAttributeHandler(idp_md, hub_md, sp_md, response *gosaml.Xp) (err error
 		//must := hub_md.QueryBool(requestedAttribute, "@must")
 		singular := hub_md.QueryBool(requestedAttribute, "@singular")
 
-        // accept attributes in both uri and basic format
+		// accept attributes in both uri and basic format
 		attributes := response.Query(sourceAttributes, `saml:Attribute[@Name="`+name+`" or @Name="`+friendlyName+`"]`)
 		if len(attributes) == 0 && mandatory {
 			err = fmt.Errorf("mandatory: %s", friendlyName)
@@ -389,7 +411,7 @@ func WayfAttributeHandler(idp_md, hub_md, sp_md, response *gosaml.Xp) (err error
 				return
 			}
 			if len(valueNodes) != 1 && mandatory {
-			    err = fmt.Errorf("mandatory: %s", friendlyName)
+				err = fmt.Errorf("mandatory: %s", friendlyName)
 				return
 			}
 			attribute.SetAttr("Name", name)

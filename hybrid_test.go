@@ -7,12 +7,12 @@ import (
 )
 
 const (
-    HUB_OP_MDQ = "/home/mz/hub_ops.mddb"
+	HUB_OP_MDQ = "/home/mz/hub_ops.mddb"
 )
 
 var (
-	_              = log.Println
-   	hub_op *lMDQ.MDQ
+	_      = log.Println
+	hub_op *lMDQ.MDQ
 
 	sourceResponse = gosaml.NewXp([]byte(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
                 xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
@@ -171,15 +171,13 @@ var (
 `))
 )
 
-
 func ExampleWayfAttributeHandler() {
 	hub_md := gosaml.NewXp(wayfrequestedattributes)
 	idp := sourceResponse.Query1(nil, "/samlp:Response/saml:Issuer")
 
-	hub_op , _ := new(lMDQ.MDQ).Open(HUB_OP_MDQ)
+	hub_op, _ := new(lMDQ.MDQ).Open(HUB_OP_MDQ)
 	idp_md, _, _ := hub_op.MDQ(idp)
-    WayfAttributeHandler(idp_md, hub_md, sourceResponse)
-    log.Println(sourceResponse.Pp())
-    // output: hi
+	WayfAttributeHandler(idp_md, hub_md, sourceResponse)
+	log.Println(sourceResponse.Pp())
+	// output: hi
 }
-
