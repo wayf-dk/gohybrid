@@ -1,7 +1,7 @@
-package main
+package gohybrid
 
 import (
-	"github.com/wayf-dk/gosaml"
+	"github.com/wayf-dk/goxml"
 	"github.com/wayf-dk/lMDQ"
 	"log"
 )
@@ -14,7 +14,7 @@ var (
 	_      = log.Println
 	hub_op *lMDQ.MDQ
 
-	sourceResponse = gosaml.NewXp([]byte(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+	sourceResponse = goxml.NewXp(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
                 xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
                 ID="_336333b557cf99d44124c2c2b02b1cc2d4efb4fe2c"
                 Version="2.0"
@@ -168,16 +168,18 @@ var (
         </saml:AttributeStatement>
     </saml:Assertion>
 </samlp:Response>
-`))
+`)
 )
 
 func ExampleWayfAttributeHandler() {
-	hub_md := gosaml.NewXp(wayfrequestedattributes)
+	hub_md := goxml.NewXp(Wayfrequestedattributes)
 	idp := sourceResponse.Query1(nil, "/samlp:Response/saml:Issuer")
+	log.Println(idp)
 
-	hub_op, _ := new(lMDQ.MDQ).Open(HUB_OP_MDQ)
-	idp_md, _, _ := hub_op.MDQ(idp)
-	WayfAttributeHandler(idp_md, hub_md, sourceResponse)
-	log.Println(sourceResponse.Pp())
+	hub_op := new(lMDQ.MDQ)
+	hub_op.Open(HUB_OP_MDQ)
+	idp_md, _ := hub_op.MDQ(idp)
+	WayfAttributeHandler(idp_md, hub_md, hub_md, sourceResponse)
+	log.Println(sourceResponse.Doc.Dump(true))
 	// output: hi
 }
