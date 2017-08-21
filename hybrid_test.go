@@ -1,4 +1,4 @@
-package gohybrid
+package main
 
 import (
 	"github.com/wayf-dk/goxml"
