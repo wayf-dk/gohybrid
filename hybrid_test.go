@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/wayf-dk/goxml"
 	"github.com/wayf-dk/lMDQ"
 	"log"
@@ -171,15 +172,66 @@ var (
 `)
 )
 
+func ExampleMD() {
+    mddtu := md{entities: make(map[string]*goxml.Xp)}
+    mddtu.entities["https://wayf.ait.dtu.dk/saml2/idp/metadata.php"] = idp_md
+    _, x := mddtu.MDQ("https://wayf.ait.dtu.dk/saml2/idp/metadata.php")
+    fmt.Println(x)
+    _, x = mddtu.MDQ("x")
+    fmt.Println(x)
+    // output:
+    // <nil>
+    // Not found: x
+
+}
+
 func ExampleWayfAttributeHandler() {
 	hub_md := goxml.NewXp(Wayfrequestedattributes)
-	idp := sourceResponse.Query1(nil, "/samlp:Response/saml:Issuer")
-	log.Println(idp)
 
-	hub_op := new(lMDQ.MDQ)
-	hub_op.Open(HUB_OP_MDQ)
-	idp_md, _ := hub_op.MDQ(idp)
 	WayfAttributeHandler(idp_md, hub_md, hub_md, sourceResponse)
-	log.Println(sourceResponse.Doc.Dump(true))
-	// output: hi
+	attributeStatement := sourceResponse.Query(nil, "//saml:AttributeStatement")[0]
+	fmt.Println(attributeStatement.String())
+	// output:
+	// <saml:AttributeStatement>
+	//             <saml:Attribute Name="uid" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:basic">
+	//                 <saml:AttributeValue xsi:type="xs:string">madpe</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:0.9.2342.19200300.100.1.3" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="mail">
+	//                 <saml:AttributeValue xsi:type="xs:string">madpe@dtu.dk</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:2.5.4.42" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="gn">
+	//                 <saml:AttributeValue xsi:type="xs:string">Mads Freek</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:2.5.4.4" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="sn">
+	//                 <saml:AttributeValue xsi:type="xs:string">Petersen</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:2.5.4.3" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="cn">
+	//                 <saml:AttributeValue xsi:type="xs:string">Mads Freek Petersen</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:2.16.840.1.113730.3.1.39" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="preferredLanguage">
+	//                 <saml:AttributeValue xsi:type="xs:string">da-DK</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:2.5.4.10" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="organizationName">
+	//                 <saml:AttributeValue xsi:type="xs:string">Danmarks Tekniske Universitet</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.6" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="eduPersonPrincipalName">
+	//                 <saml:AttributeValue xsi:type="xs:string">madpe@dtu.dk</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.5" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="eduPersonPrimaryAffiliation">
+	//                 <saml:AttributeValue xsi:type="xs:string">staff</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.9" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="eduPersonScopedAffiliation">
+	//                 <saml:AttributeValue xsi:type="xs:string">staff@just.testing.dtu.dk</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:1.3.6.1.4.1.25178.1.2.15" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="schacPersonalUniqueID">
+	//                 <saml:AttributeValue xsi:type="xs:string">urn:mace:terena.org:schac:personalUniqueID:dk:CPR:2408586234</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.11" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="eduPersonAssurance">
+	//                 <saml:AttributeValue xsi:type="xs:string">2</saml:AttributeValue>
+	//             </saml:Attribute>
+	//             <saml:Attribute Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.7" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri" FriendlyName="eduPersonEntitlement">
+	//                 <saml:AttributeValue xsi:type="xs:string">urn:mace:terena.org:tcs:escience-user</saml:AttributeValue>
+	//             </saml:Attribute>
+	//         <saml:Attribute Name="urn:oid:1.3.6.1.4.1.25178.1.2.10" FriendlyName="schacHomeOrganizationType" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri"><saml:AttributeValue>urn:mace:terena.org:schac:homeOrganizationType:eu:higherEducationalInstitution</saml:AttributeValue></saml:Attribute><saml:Attribute Name="urn:oid:1.3.6.1.4.1.25178.1.2.9" FriendlyName="schacHomeOrganization" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri"><saml:AttributeValue>dtu.dk</saml:AttributeValue></saml:Attribute><saml:Attribute Name="urn:oid:2.16.840.1.113730.3.1.241" FriendlyName="displayName" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri"><saml:AttributeValue>Mads Freek Petersen</saml:AttributeValue></saml:Attribute><saml:Attribute Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.10" FriendlyName="eduPersonTargetedID" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri"><saml:AttributeValue>WAYF-DK-248f81f290134aae5d72f5a37e197af78748e633</saml:AttributeValue></saml:Attribute><saml:Attribute Name="urn:oid:1.3.6.1.4.1.25178.1.2.3" FriendlyName="schacDateOfBirth" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri"><saml:AttributeValue>18580824</saml:AttributeValue></saml:Attribute><saml:Attribute Name="urn:oid:1.3.6.1.4.1.25178.1.0.2.3" FriendlyName="schacYearOfBirth" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri"><saml:AttributeValue>1858</saml:AttributeValue></saml:Attribute><md:RequestedAttribute xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" FriendlyName="eduPersonAffiliation" Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.1" isRequired="true"><saml:AttributeValue>staff</saml:AttributeValue><saml:AttributeValue>member</saml:AttributeValue></md:RequestedAttribute><md:RequestedAttribute xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" FriendlyName="eduPersonScopedAffiliation" Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.9" isRequired="true"><saml:AttributeValue>staff@dtu.dk</saml:AttributeValue><saml:AttributeValue>member@dtu.dk</saml:AttributeValue></md:RequestedAttribute></saml:AttributeStatement>
+	//
 }
