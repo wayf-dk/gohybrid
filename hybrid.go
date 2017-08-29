@@ -662,6 +662,7 @@ func main() {
     hub = md{entities: make(map[string]*goxml.Xp)}
     hub.entities["https://wayf.wayf.dk"] = hub_md
     hub.entities["https://wayf.wayf.dk/saml2/idp/SSOService2.php"] = hub_md
+    hub.entities["https://wayf.wayf.dk/module.php/saml/sp/saml2-acs.php/wayf.wayf.dk"] = hub_md
 
 	hubmd, _ = hub.MDQ(config["HYBRID_HUB"])
 
@@ -672,6 +673,7 @@ func main() {
 
 	edugain = md{entities: make(map[string]*goxml.Xp)}
 	edugain.entities["https://krib.wayf.dk/krib.php/wayfsp.wayf.dk"] = sp_md_krib
+    edugain.entities["https://krib.wayf.dk/krib.php/wayfsp.wayf.dk/ss/module.php/saml/sp/saml2-acs.php/default-sp"] = sp_md_krib
     edugain.entities["https://birk.wayf.dk/birk.php/wayf.ait.dtu.dk/saml2/idp/metadata.php"] = idp_md_birk
     edugain.entities["https://birk.wayf.dk/birk.php/wayf.ait.dtu.dk/saml2/idp/SSOService.php"] = idp_md_birk
 
@@ -713,7 +715,7 @@ func wayfspService(w http.ResponseWriter, r *http.Request) (err error) {
 
 func wayfspACService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
-	response, _, _, err := gosaml.GetSAMLMsg(r, "SAMLResponse", hub, hub_ops, nil)
+	response, _, _, err := gosaml.ReceiveSAMLResponse(r, hub, hub_ops)
 	if err != nil {
 	    log.Println(err)
 		return
@@ -733,12 +735,12 @@ func ssoService(w http.ResponseWriter, r *http.Request) (err error) {
 	// receiveRequest -> request, issuer md, receiver md
 	//     check for IDPList 1st in md, then in request then in query
 	//     sanitize idp from query or request
-	request, spmd, _, err := gosaml.GetSAMLMsg(r, "SAMLRequest", hub_ops, hub, nil)
+	request, spmd, _, err := gosaml.ReceiveSAMLRequest(r, hub_ops, hub)
 	if err != nil {
 		return
 	}
 	entityID := spmd.Query1(nil, "@entityID")
-	idp := spmd.Query1(nil, "IDPList/ProviderID") // Need to find a place for IDPList
+	idp := spmd.Query1(nil, "//IDPList/ProviderID") // Need to find a place for IDPList
 	if idp == "" {
 		idp = request.Query1(nil, "IDPList/ProviderID")
 	}
@@ -783,14 +785,17 @@ func ssoService(w http.ResponseWriter, r *http.Request) (err error) {
 }
 
 func birkService(w http.ResponseWriter, r *http.Request) (err error) {
+    // use incoming request for crafting the new one
+    // remember to add the Scoping element to inform the IdP of requesterID - if stated in metadata for the IdP
 	defer r.Body.Close()
 	// get the sp as well to check for allowed acs
-	req, _, mdbirkidp, err := gosaml.GetSAMLMsg(r, "SAMLRequest", edugain, edugain, nil)
+	request, _, mdbirkidp, err := gosaml.ReceiveSAMLRequest(r, edugain, edugain)
 	if err != nil {
 		return
 	}
-	// Save the request in a cookie for when the response comes back
-	cookievalue := base64.StdEncoding.EncodeToString(gosaml.Deflate(req.Doc.Dump(true)))
+	// Save the issuer and destination in a cookie for when the response comes back
+
+	cookievalue := base64.StdEncoding.EncodeToString(gosaml.Deflate(request.Doc.Dump(true)))
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: cookievalue, Domain: config["HYBRID_DOMAIN"], Path: "/", Secure: true, HttpOnly: true})
 
 	idp := debify.ReplaceAllString(mdbirkidp.Query1(nil, "@entityID"), "$1$2")
@@ -820,16 +825,18 @@ func acsService(w http.ResponseWriter, r *http.Request) (err error) {
 		return err
 	}
 	// to-do: check hmac
-	// we checked the request when we received in birkService - we can use it without fear
+	// we checked the request when we received in birkService - we can use it without fear ie. we just parse it
+	bmsg, err := base64.StdEncoding.DecodeString(birk.Value)
+	log.Println("cookie", string(gosaml.Inflate(bmsg)))
+    request:= goxml.NewXp(string(gosaml.Inflate(bmsg)))
 
-	request, err := gosaml.DecodeSAMLMsg(birk.Value, true)
-	//sp_md, err := hub_ops.MDQ(request.Query1(nil, "/samlp:AuthnRequest/saml:Issuer"))
-
+	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: "", Domain: config["HYBRID_DOMAIN"], Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
 	sp_md, err := edugain.MDQ(request.Query1(nil, "/samlp:AuthnRequest/saml:Issuer"))
+	if err != nil {
+	    return
+	}
 
-	//http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: "", MaxAge: -1, Domain: config["HYBRID_DOMAIN"], Path: "/", Secure: true, HttpOnly: true})
-
-	response, idp_md, _, err := gosaml.GetSAMLMsg(r, "SAMLResponse", hub_ops, hub, hubmd)
+	response, idp_md, _, err := gosaml.ReceiveSAMLResponse(r, hub_ops, hub)
 	if err != nil {
 		return
 	}
@@ -856,7 +863,10 @@ func acsService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	birkmd, err := edugain.MDQ(request.Query1(nil, "@Destination"))
+	birkmd, err := edugain.MDQ(request.Query1(nil, "/samlp:AuthnRequest/@Destination"))
+	if err != nil {
+	    return
+	}
 	nameid := response.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
 	// respect nameID in req, give persistent id + all computed attributes + nameformat conversion
 	nameidformat := sp_md.Query1(nil, "./md:SPSSODescriptor/md:NameIDFormat")
@@ -888,7 +898,7 @@ func acsService(w http.ResponseWriter, r *http.Request) (err error) {
 func kribService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
 
-	response, _, _, err := gosaml.GetSAMLMsg(r, "SAMLResponse", edugain, edugain, nil)
+	response, _, _, err := gosaml.ReceiveSAMLResponse(r, edugain, edugain)
 	if err != nil {
 		return
 	}
