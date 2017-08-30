@@ -173,15 +173,15 @@ var (
 )
 
 func ExampleMD() {
-    mddtu := md{entities: make(map[string]*goxml.Xp)}
-    mddtu.entities["https://wayf.ait.dtu.dk/saml2/idp/metadata.php"] = idp_md
-    _, x := mddtu.MDQ("https://wayf.ait.dtu.dk/saml2/idp/metadata.php")
-    fmt.Println(x)
-    _, x = mddtu.MDQ("x")
-    fmt.Println(x)
-    // output:
-    // <nil>
-    // Not found: x
+	mddtu := md{entities: make(map[string]*goxml.Xp)}
+	mddtu.entities["https://wayf.ait.dtu.dk/saml2/idp/metadata.php"] = idp_md
+	_, x := mddtu.MDQ("https://wayf.ait.dtu.dk/saml2/idp/metadata.php")
+	fmt.Println(x)
+	_, x = mddtu.MDQ("x")
+	fmt.Println(x)
+	// output:
+	// <nil>
+	// Not found: x
 
 }
 
