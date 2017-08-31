@@ -18,6 +18,7 @@ import (
 	"crypto"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	//    "github.com/spacemonkeygo/openssl"
 	"html/template"
@@ -32,12 +33,13 @@ import (
 	"strings"
 	"sync"
 	//	"syscall"
+	"time"
 	//"github.com/gobuffalo/packr"
+	"github.com/gorilla/securecookie"
 	"github.com/spf13/viper"
 	"github.com/wayf-dk/go-libxml2/types"
 	"github.com/wayf-dk/gosaml"
 	"github.com/wayf-dk/goxml"
-	"time"
 )
 
 type (
@@ -88,6 +90,9 @@ var (
 
 	basic2uri                                      = map[string]string{}
 	idp_md, idp_md_birk, sp_md, sp_md_krib, hub_md *goxml.Xp
+
+	hashKey   []byte
+	seccookie *securecookie.SecureCookie
 )
 
 func (m md) MDQ(key string) (xp *goxml.Xp, err error) {
@@ -107,6 +112,9 @@ func main() {
 		panic(fmt.Errorf("Fatal error config file: %s \n", err))
 	}
 	config = viper.GetStringMapString("config")
+
+	hashKey, err := hex.DecodeString(config["securecookiehashkey"])
+	seccookie = securecookie.New(hashKey, nil)
 
 	postform = template.Must(template.New("post").Parse(config["postformtemplate"]))
 
@@ -132,32 +140,14 @@ func main() {
 
 	*/
 
-	/*
-	   lMDQ_PATH="test_hub.mddb" lMDQ_URL="https://test-phph.test.lan/test-md/wayf-metadata.xml" lMDQ_HASH="e0cff78934baa85a4a1b084dcb586fe6bb2f7619" ./lMDQ
-	   lMDQ_PATH="test_hub_ops.mddb" lMDQ_URL="https://phph.wayf.dk/test-md/HUB.xml" lMDQ_HASH="e0cff78934baa85a4a1b084dcb586fe6bb2f7619" ./lMDQ
-	   lMDQ_PATH="test_edugain.mddb" lMDQ_URL="https://test-phph.test.lan/test-md/WAYF-INTERFED.xml" lMDQ_HASH="e0cff78934baa85a4a1b084dcb586fe6bb2f7619" ./lMDQ
-	*/
-
-	/*
-		if hub, err = lMDQ.Open("/tmp/test_hub.mddb"); err != nil {
-			log.Println(err)
-		}
-		if hub_ops, err = lMDQ.Open("/tmp/test_hybrid_fed.mddb"); err != nil {
-			log.Println(err)
-		}
-		if edugain, err = lMDQ.Open("/tmp/test_hybrid_interfed.mddb"); err != nil {
-			log.Println(err)
-		}
-	*/
-
 	hub = md{entities: make(map[string]*goxml.Xp)}
-	prepareMetadata("hub", &hub)
+	prepareMetadata(viper.GetString(`metadata.hub`), &hub)
 
 	hub_ops = md{entities: make(map[string]*goxml.Xp)}
-    prepareMetadata("internal", &hub_ops)
+	prepareMetadata(viper.GetString(`metadata.internal`), &hub_ops)
 
 	edugain = md{entities: make(map[string]*goxml.Xp)}
-    prepareMetadata("external", &edugain)
+	prepareMetadata(viper.GetString(`metadata.external`), &edugain)
 
 	attrs := goxml.NewXp(config["wayfrequestedattributes"])
 	for _, attr := range attrs.Query(nil, "./md:SPSSODescriptor/md:AttributeConsumingService/md:RequestedAttribute") {
@@ -167,30 +157,29 @@ func main() {
 	}
 
 	//http.HandleFunc("/status", statushandler)
-	http.Handle(config["hybrid_public_prefix"], http.FileServer(http.Dir(config["hybrid_public"])))
+	//http.Handle(config["hybrid_public_prefix"], http.FileServer(http.Dir(config["hybrid_public"])))
 	http.Handle(config["hybrid_sso_service"], appHandler(ssoService))
 	http.Handle(config["hybrid_acs"], appHandler(acsService))
+	http.Handle(config["nemlogin_acs"], appHandler(acsService))
 	http.Handle(config["hybrid_birk"], appHandler(birkService))
 	http.Handle(config["hybrid_krib"], appHandler(kribService))
-	http.Handle(config["wayfsp_sp"], appHandler(wayfspService))
-	http.Handle(config["wayfsp_acs"], appHandler(wayfspACService))
+	http.Handle(config["testsp"]+"/", appHandler(testSPService)) // need a root "/" for routing
+	http.Handle(config["testsp_acs"], appHandler(testSPACService))
 
 	log.Println("listening on ", config["hybrid_interface"])
 	err = http.ListenAndServeTLS(config["hybrid_interface"], config["hybrid_https_cert"], config["hybrid_https_key"], nil)
-	//err = openssl.ListenAndServeTLS(config["HYBRID_INTERFACE"], config["HYBRID_HTTPS_CERT"], config["HYBRID_HTTPS_KEY"], nil)
-
 	if err != nil {
 		log.Printf("main(): %s\n", err)
 	}
 }
 
-func prepareMetadata(name string, index *md) {
+func prepareMetadata(metadata string, index *md) {
 	indextargets := []string{
 		"./md:IDPSSODescriptor/md:SingleSignOnService[@Binding='urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect']/@Location",
 		"./md:SPSSODescriptor/md:AssertionConsumerService[@Binding='urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST']/@Location",
 	}
 
-	x := goxml.NewXp(viper.GetString(`metadata.` + name))
+	x := goxml.NewXp(metadata)
 	entities := x.Query(nil, "md:EntityDescriptor")
 
 	for _, entity := range entities {
@@ -198,27 +187,25 @@ func prepareMetadata(name string, index *md) {
 		entityID, _ := entity.(types.Element).GetAttribute("entityID")
 		index.entities[entityID.Value()] = newentity
 		for _, target := range indextargets {
-			locations := newentity.Query(entity, target)
+			locations := newentity.Query(nil, target)
 			for _, location := range locations {
 				index.entities[location.NodeValue()] = newentity
 			}
 		}
 	}
-	fmt.Println(name, index)
 }
 
-func wayfspService(w http.ResponseWriter, r *http.Request) (err error) {
+func testSPService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
-	sp_md, _ := hub_ops.MDQ("https://wayfsp.wayf.dk")
-	hub_Md, _ := hub.MDQ("https://wayf.wayf.dk")
-	newrequest := gosaml.NewAuthnRequest(stdtiming.Refresh(), sp_md, hub_Md)
+	sp_md, _ := hub_ops.MDQ("https://" + config["testsp"])
+	hub_md, _ := hub.MDQ(config["hybrid_hub"])
+	newrequest := gosaml.NewAuthnRequest(stdtiming.Refresh(), sp_md, hub_md)
 	u, _ := gosaml.SAMLRequest2Url(newrequest, "", "", "") // not signed so blank key, pw and algo
-	u.Host = "wayf.wayf.dk"
 	http.Redirect(w, r, u.String(), http.StatusFound)
 	return
 }
 
-func wayfspACService(w http.ResponseWriter, r *http.Request) (err error) {
+func testSPACService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
 	response, _, _, err := gosaml.ReceiveSAMLResponse(r, hub, hub_ops)
 	if err != nil {
@@ -227,8 +214,23 @@ func wayfspACService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8") // normal header
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(response.Doc.Dump(true)))
+	w.Write(ppxml(response))
 	log.Println(response.Doc.Dump(true))
+	return
+}
+
+func ppxml(xp *goxml.Xp) (buf []byte) {
+	txt := xp.Doc.Dump(true)
+
+	type node struct {
+		Attr     []xml.Attr
+		XMLName  xml.Name
+		Children []node `xml:",any"`
+		Text     string `xml:",chardata"`
+	}
+	x := node{}
+	_ = xml.Unmarshal([]byte(txt), &x)
+	buf, _ = xml.MarshalIndent(x, "", "\t")
 	return
 }
 
@@ -300,7 +302,7 @@ func birkService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 	// Save the issuer and destination in a cookie for when the response comes back
 
-	cookievalue := base64.StdEncoding.EncodeToString(gosaml.Deflate(request.Doc.Dump(true)))
+	cookievalue, err := seccookie.Encode("BIRK", gosaml.Deflate(request.Doc.Dump(true)))
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: cookievalue, Domain: config["hybrid_domain"], Path: "/", Secure: true, HttpOnly: true})
 
 	idp := debify.ReplaceAllString(mdbirkidp.Query1(nil, "@entityID"), "$1$2")
@@ -316,8 +318,6 @@ func birkService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 	// use a std request - we take care of NameID etc in acsService below
 	newrequest := gosaml.NewAuthnRequest(stdtiming.Refresh(), mdhub, mdidp)
-	// to-do delete the following line when md for the hub is OK
-	newrequest.QueryDashP(nil, "@AssertionConsumerServiceURL", config["hybrid_hub"]+config["hybrid_acs"], nil)
 	u, _ := gosaml.SAMLRequest2Url(newrequest, "", "", "") // not signed so blank key, pw and algo
 	http.Redirect(w, r, u.String(), http.StatusFound)
 	return
@@ -329,11 +329,15 @@ func acsService(w http.ResponseWriter, r *http.Request) (err error) {
 	if err != nil {
 		return err
 	}
-	// to-do: check hmac
+
+	value := []byte{}
+	if err = seccookie.Decode("BIRK", birk.Value, &value); err != nil {
+		return
+	}
+
 	// we checked the request when we received in birkService - we can use it without fear ie. we just parse it
-	bmsg, err := base64.StdEncoding.DecodeString(birk.Value)
-	log.Println("cookie", string(gosaml.Inflate(bmsg)))
-	request := goxml.NewXp(string(gosaml.Inflate(bmsg)))
+	log.Println("cookie", string(gosaml.Inflate(value)))
+	request := goxml.NewXp(string(gosaml.Inflate(value)))
 
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: "", Domain: config["hybrid_domain"], Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
 	sp_md, err := edugain.MDQ(request.Query1(nil, "/samlp:AuthnRequest/saml:Issuer"))
