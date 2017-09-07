@@ -34,6 +34,7 @@ type (
 	formdata struct {
 		Acs          string
 		Samlresponse string
+		RelayState   string
 	}
 
 	idpsppair struct {
@@ -94,7 +95,7 @@ func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
 	// receiveRequest -> request, issuer md, receiver md
 	//     check for IDPList 1st in md, then in request then in query
 	//     sanitize idp from query or request
-	request, spmd, _, err := gosaml.ReceiveSAMLRequest(r, config.Internal, config.Hub)
+	request, spmd, _, relayState, err := gosaml.ReceiveSAMLRequest(r, config.Internal, config.Hub)
 	if err != nil {
 		return
 	}
@@ -136,7 +137,7 @@ func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
 
 		}
 		request.QueryDashP(nil, "@Destination", ssoservice, nil)
-		u, _ := gosaml.SAMLRequest2Url(request, "", "", "")
+		u, _ := gosaml.SAMLRequest2Url(request, relayState, "", "", "")
 		log.Println(request.Doc.Dump(true))
 		http.Redirect(w, r, u.String(), http.StatusFound)
 	}
@@ -149,7 +150,7 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// check ad-hoc feds overlab
 	defer r.Body.Close()
 	// get the sp as well to check for allowed acs
-	request, _, mdbirkidp, err := gosaml.ReceiveSAMLRequest(r, config.External, config.External)
+	request, _, mdbirkidp, relayState, err := gosaml.ReceiveSAMLRequest(r, config.External, config.External)
 	if err != nil {
 		return
 	}
@@ -171,7 +172,7 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 	// use a std request - we take care of NameID etc in acsService below
 	newrequest := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), mdhub, mdidp)
-	u, _ := gosaml.SAMLRequest2Url(newrequest, "", "", "") // not signed so blank key, pw and algo
+	u, _ := gosaml.SAMLRequest2Url(newrequest, relayState, "", "", "") // not signed so blank key, pw and algo
 	http.Redirect(w, r, u.String(), http.StatusFound)
 	return
 }
@@ -198,7 +199,7 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	response, idp_md, _, err := gosaml.ReceiveSAMLResponse(r, config.Internal, config.Hub)
+	response, idp_md, _, relayState, err := gosaml.ReceiveSAMLResponse(r, config.Internal, config.Hub)
 	if err != nil {
 		return
 	}
@@ -235,7 +236,7 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 	// when consent as a service is ready - we will post to that
 	acs := newresponse.Query1(nil, "@Destination")
 
-	data := formdata{Acs: acs, Samlresponse: base64.StdEncoding.EncodeToString([]byte(newresponse.Doc.Dump(false)))}
+	data := formdata{Acs: acs, Samlresponse: base64.StdEncoding.EncodeToString([]byte(newresponse.Doc.Dump(false))), RelayState: relayState}
 	postform.Execute(w, data)
 	return
 }
@@ -244,7 +245,7 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 	// check ad-hoc feds overlap
 	defer r.Body.Close()
 
-	response, _, _, err := gosaml.ReceiveSAMLResponse(r, config.External, config.External)
+	response, _, _, relayState, err := gosaml.ReceiveSAMLResponse(r, config.External, config.External)
 	if err != nil {
 		return
 	}
@@ -287,7 +288,7 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 		}
 	}
 
-	data := formdata{Acs: destination, Samlresponse: base64.StdEncoding.EncodeToString([]byte(response.Doc.Dump(false)))}
+	data := formdata{Acs: destination, Samlresponse: base64.StdEncoding.EncodeToString([]byte(response.Doc.Dump(false))), RelayState: relayState}
 	postform.Execute(w, data)
 	return
 }
