@@ -17,6 +17,7 @@ package gohybrid
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"github.com/gorilla/securecookie"
 	"github.com/wayf-dk/go-libxml2/types"
@@ -35,6 +36,7 @@ type (
 		Acs          string
 		Samlresponse string
 		RelayState   string
+		Ard template.JS
 	}
 
 	idpsppair struct {
@@ -51,10 +53,11 @@ type (
 		Internal, External, Hub gosaml.Md
 		SecureCookieHashKey     string
 		PostFormTemplate        string
+		AttributeReleaseTemplate        string
 		Basic2uri               map[string]string
 		StdTiming               gosaml.IdAndTiming
 		ElementsToSign          []string
-		AttributeHandler        func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) error
+		AttributeHandler        func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (error, map[string][]string)
 	}
 )
 
@@ -74,7 +77,7 @@ var (
 	bify         = regexp.MustCompile("^(https?://)(.*)$")
 	debify       = regexp.MustCompile("^(https?://)(?:(?:birk|krib)\\.wayf.dk/(?:birk|krib)\\.php/)(.+)$")
 
-	postform  *template.Template
+	postForm,attributeReleaseForm  *template.Template
 	hashKey   []byte
 	seccookie *securecookie.SecureCookie
 	config    = Conf{}
@@ -84,7 +87,8 @@ func Config(configuration Conf) {
 	config = configuration
 	hashKey, _ := hex.DecodeString(config.SecureCookieHashKey)
 	seccookie = securecookie.New(hashKey, nil)
-	postform = template.Must(template.New("post").Parse(config.PostFormTemplate))
+	postForm = template.Must(template.New("post").Parse(config.PostFormTemplate))
+	attributeReleaseForm = template.Must(template.New("post").Parse(config.AttributeReleaseTemplate))
 }
 
 func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
@@ -204,7 +208,7 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	err = config.AttributeHandler(idp_md, config.HubRequestedAttributes, sp_md, response)
+	err, ard := config.AttributeHandler(idp_md, config.HubRequestedAttributes, sp_md, response)
 	if err != nil {
 		return
 	}
@@ -233,11 +237,15 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 		}
 	}
 
+	// Prepare data for the attributerelease form
+
+
 	// when consent as a service is ready - we will post to that
 	acs := newresponse.Query1(nil, "@Destination")
 
-	data := formdata{Acs: acs, Samlresponse: base64.StdEncoding.EncodeToString([]byte(newresponse.Doc.Dump(false))), RelayState: relayState}
-	postform.Execute(w, data)
+    ardjson, err := json.Marshal(ard)
+	data := formdata{Acs: acs, Samlresponse: base64.StdEncoding.EncodeToString([]byte(newresponse.Doc.Dump(false))), RelayState: relayState, Ard: template.JS(ardjson)}
+	attributeReleaseForm.Execute(w, data)
 	return
 }
 
@@ -289,6 +297,6 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	data := formdata{Acs: destination, Samlresponse: base64.StdEncoding.EncodeToString([]byte(response.Doc.Dump(false))), RelayState: relayState}
-	postform.Execute(w, data)
+	postForm.Execute(w, data)
 	return
 }
