@@ -36,7 +36,7 @@ type (
 		Acs          string
 		Samlresponse string
 		RelayState   string
-		Ard template.JS
+		Ard          template.JS
 	}
 
 	idpsppair struct {
@@ -44,20 +44,32 @@ type (
 		sp  string
 	}
 
+	AttributeReleaseData struct {
+		Values         map[string][]string
+		IdPDisplayName map[string]string
+		IdPLogo        string
+		SPDisplayName  map[string]string
+		SPDescription  map[string]string
+		SPLogo         string
+		SPEntityID     string
+		Key            string
+		Hash           string
+	}
+
 	Conf struct {
-		DiscoveryService        string
-		Domain                  string
-		HubEntityID             string
-		EptidSalt               string
-		HubRequestedAttributes  *goxml.Xp
-		Internal, External, Hub gosaml.Md
-		SecureCookieHashKey     string
-		PostFormTemplate        string
-		AttributeReleaseTemplate        string
-		Basic2uri               map[string]string
-		StdTiming               gosaml.IdAndTiming
-		ElementsToSign          []string
-		AttributeHandler        func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (error, map[string][]string)
+		DiscoveryService         string
+		Domain                   string
+		HubEntityID              string
+		EptidSalt                string
+		HubRequestedAttributes   *goxml.Xp
+		Internal, External, Hub  gosaml.Md
+		SecureCookieHashKey      string
+		PostFormTemplate         string
+		AttributeReleaseTemplate string
+		Basic2uri                map[string]string
+		StdTiming                gosaml.IdAndTiming
+		ElementsToSign           []string
+		AttributeHandler         func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (error, AttributeReleaseData)
 	}
 )
 
@@ -77,10 +89,10 @@ var (
 	bify         = regexp.MustCompile("^(https?://)(.*)$")
 	debify       = regexp.MustCompile("^(https?://)(?:(?:birk|krib)\\.wayf.dk/(?:birk|krib)\\.php/)(.+)$")
 
-	postForm,attributeReleaseForm  *template.Template
-	hashKey   []byte
-	seccookie *securecookie.SecureCookie
-	config    = Conf{}
+	postForm, attributeReleaseForm *template.Template
+	hashKey                        []byte
+	seccookie                      *securecookie.SecureCookie
+	config                         = Conf{}
 )
 
 func Config(configuration Conf) {
@@ -142,7 +154,6 @@ func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
 		}
 		request.QueryDashP(nil, "@Destination", ssoservice, nil)
 		u, _ := gosaml.SAMLRequest2Url(request, relayState, "", "", "")
-		log.Println(request.Doc.Dump(true))
 		http.Redirect(w, r, u.String(), http.StatusFound)
 	}
 	return
@@ -169,10 +180,22 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// are we remapping - for now only use case is https://nemlogin.wayf.dk -> https://saml.nemlog-in.dk
 	if rm, ok := remap[idp]; ok {
 		mdidp, err = config.Internal.MDQ(rm.idp)
+		if err != nil {
+			return
+		}
 		mdhub, err = config.Internal.MDQ(rm.sp)
+		if err != nil {
+			return
+		}
 	} else {
 		mdidp, err = config.Internal.MDQ(idp)
+		if err != nil {
+			return
+		}
 		mdhub, err = config.Hub.MDQ(config.HubEntityID)
+		if err != nil {
+			return
+		}
 	}
 	// use a std request - we take care of NameID etc in acsService below
 	newrequest := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), mdhub, mdidp)
@@ -194,7 +217,6 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	// we checked the request when we received in birkService - we can use it without fear ie. we just parse it
-	log.Println("cookie", string(gosaml.Inflate(value)))
 	request := goxml.NewXp(string(gosaml.Inflate(value)))
 
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: "", Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
@@ -239,11 +261,10 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 
 	// Prepare data for the attributerelease form
 
-
 	// when consent as a service is ready - we will post to that
 	acs := newresponse.Query1(nil, "@Destination")
 
-    ardjson, err := json.Marshal(ard)
+	ardjson, err := json.Marshal(ard)
 	data := formdata{Acs: acs, Samlresponse: base64.StdEncoding.EncodeToString([]byte(newresponse.Doc.Dump(false))), RelayState: relayState, Ard: template.JS(ardjson)}
 	attributeReleaseForm.Execute(w, data)
 	return
