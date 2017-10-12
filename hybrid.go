@@ -24,6 +24,7 @@ import (
 	"github.com/wayf-dk/gosaml"
 	"github.com/wayf-dk/goxml"
 	"html/template"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -37,11 +38,6 @@ type (
 		Samlresponse string
 		RelayState   string
 		Ard          template.JS
-	}
-
-	idpsppair struct {
-		idp string
-		sp  string
 	}
 
 	AttributeReleaseData struct {
@@ -69,24 +65,24 @@ type (
 		Basic2uri                map[string]string
 		StdTiming                gosaml.IdAndTiming
 		ElementsToSign           []string
-		AttributeHandler         func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (error, AttributeReleaseData)
+		Certpath                 string
+		SSOServiceHandler        func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (string, string, error)
+		BirkHandler              func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (*goxml.Xp, *goxml.Xp, error)
+		AttributeHandler         func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (AttributeReleaseData, error)
 	}
 )
 
 const (
 	idpCertQuery = `./md:IDPSSODescriptor/md:KeyDescriptor[@use="signing" or not(@use)]/ds:KeyInfo/ds:X509Data/ds:X509Certificate`
+	spCertQuery  = `./md:SPSSODescriptor/md:KeyDescriptor[@use="signing" or not(@use)]/ds:KeyInfo/ds:X509Data/ds:X509Certificate`
 )
 
 var (
-	_     = log.Printf // For debugging; delete when done.
-	_     = fmt.Printf
-	remap = map[string]idpsppair{
-		"https://nemlogin.wayf.dk": idpsppair{"https://saml.nemlog-in.dk", "https://nemlogin.wayf.dk"},
-	}
+	_ = log.Printf // For debugging; delete when done.
+	_ = fmt.Printf
 
 	contextmutex sync.RWMutex
 	context      = make(map[*http.Request]map[string]string)
-	bify         = regexp.MustCompile("^(https?://)(.*)$")
 	debify       = regexp.MustCompile("^(https?://)(?:(?:birk|krib)\\.wayf.dk/(?:birk|krib)\\.php/)(.+)$")
 
 	postForm, attributeReleaseForm *template.Template
@@ -105,13 +101,7 @@ func Config(configuration Conf) {
 
 func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
-	// handle non ok urls gracefully
-	// var err error
-	// check issuer and acs in md
-	// receiveRequest -> request, issuer md, receiver md
-	//     check for IDPList 1st in md, then in request then in query
-	//     sanitize idp from query or request
-	request, spmd, _, relayState, err := gosaml.ReceiveSAMLRequest(r, config.Internal, config.Hub)
+	request, spmd, hubmd, relayState, err := gosaml.ReceiveSAMLRequest(r, config.Internal, config.Hub)
 	if err != nil {
 		return
 	}
@@ -130,23 +120,19 @@ func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
 		data.Set("entityID", entityID)
 		http.Redirect(w, r, config.DiscoveryService+data.Encode(), http.StatusFound)
 	} else {
-		var idpmd *goxml.Xp
-		/**/
-		// check overlap btw ad-hoc feds for the idp and the sp
-		kribID := bify.ReplaceAllString(entityID, "${1}krib.wayf.dk/krib.php/$2")
-		if kribID == entityID {
-			kribID = "urn:oid:1.3.6.1.4.1.39153:42:" + entityID
+		idpmd, err := config.External.MDQ(idp)
+		if err != nil {
+			return err
+		}
+
+		kribID, acsurl, err := config.SSOServiceHandler(request, spmd, hubmd, idpmd)
+		if err != nil {
+			return err
 		}
 
 		request.QueryDashP(nil, "/saml:Issuer", kribID, nil)
-		acs := request.Query1(nil, "@AssertionConsumerServiceURL")
-		acsurl := bify.ReplaceAllString(acs, "${1}krib.wayf.dk/krib.php/$2")
 		request.QueryDashP(nil, "@AssertionConsumerServiceURL", acsurl, nil)
-		/**/
-		idpmd, err = config.External.MDQ(idp)
-		if err != nil {
-			return
-		}
+
 		const ssoquery = "./md:IDPSSODescriptor/md:SingleSignOnService[@Binding='urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect']/@Location"
 		ssoservice := idpmd.Query1(nil, ssoquery)
 		if ssoservice == "" {
@@ -165,7 +151,7 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// check ad-hoc feds overlab
 	defer r.Body.Close()
 	// get the sp as well to check for allowed acs
-	request, _, mdbirkidp, relayState, err := gosaml.ReceiveSAMLRequest(r, config.External, config.External)
+	request, mdsp, mdbirkidp, relayState, err := gosaml.ReceiveSAMLRequest(r, config.External, config.External)
 	if err != nil {
 		return
 	}
@@ -174,32 +160,32 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	cookievalue, err := seccookie.Encode("BIRK", gosaml.Deflate(request.Doc.Dump(true)))
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
 
-	idp := debify.ReplaceAllString(mdbirkidp.Query1(nil, "@entityID"), "$1$2")
+	mdhub, mdidp, err := config.BirkHandler(request, mdsp, mdbirkidp)
+	if err != nil {
+		return
+	}
 
-	var mdhub, mdidp *goxml.Xp
-	// are we remapping - for now only use case is https://nemlogin.wayf.dk -> https://saml.nemlog-in.dk
-	if rm, ok := remap[idp]; ok {
-		mdidp, err = config.Internal.MDQ(rm.idp)
+	newrequest := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), mdhub, mdidp)
+
+	var privatekey []byte
+	passwd := "-"
+	wars := mdidp.Query1(nil, `./md:IDPSSODescriptor/@WantAuthnRequestsSigned`)
+	switch wars {
+	case "true", "1":
+		cert := mdhub.Query1(nil, spCertQuery) // actual signing key is always first
+		var keyname string
+		keyname, _, err = gosaml.PublicKeyInfo(cert)
 		if err != nil {
-			return
+			return err
 		}
-		mdhub, err = config.Internal.MDQ(rm.sp)
-		if err != nil {
-			return
-		}
-	} else {
-		mdidp, err = config.Internal.MDQ(idp)
-		if err != nil {
-			return
-		}
-		mdhub, err = config.Hub.MDQ(config.HubEntityID)
+
+		privatekey, err = ioutil.ReadFile(config.Certpath + keyname + ".key")
 		if err != nil {
 			return
 		}
 	}
-	// use a std request - we take care of NameID etc in acsService below
-	newrequest := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), mdhub, mdidp)
-	u, _ := gosaml.SAMLRequest2Url(newrequest, relayState, "", "", "") // not signed so blank key, pw and algo
+
+	u, _ := gosaml.SAMLRequest2Url(newrequest, relayState, string(privatekey), passwd, "sha256")
 	http.Redirect(w, r, u.String(), http.StatusFound)
 	return
 }
@@ -230,7 +216,7 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	err, ard := config.AttributeHandler(idp_md, config.HubRequestedAttributes, sp_md, response)
+	ard, err := config.AttributeHandler(idp_md, config.HubRequestedAttributes, sp_md, response)
 	if err != nil {
 		return
 	}
@@ -259,8 +245,6 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 		}
 	}
 
-	// Prepare data for the attributerelease form
-
 	// when consent as a service is ready - we will post to that
 	acs := newresponse.Query1(nil, "@Destination")
 
@@ -278,6 +262,7 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 	if err != nil {
 		return
 	}
+
 	destination := debify.ReplaceAllString(response.Query1(nil, "@Destination"), "$1$2")
 	response.QueryDashP(nil, "@Destination", destination, nil)
 	response.QueryDashP(nil, "./saml:Assertion/saml:Subject/saml:SubjectConfirmation/saml:SubjectConfirmationData/@Recipient", destination, nil)
