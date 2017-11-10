@@ -28,8 +28,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
-	"sync"
 )
 
 type (
@@ -41,49 +39,47 @@ type (
 	}
 
 	AttributeReleaseData struct {
-		Values         map[string][]string
-		IdPDisplayName map[string]string
-		IdPLogo        string
-		SPDisplayName  map[string]string
-		SPDescription  map[string]string
-		SPLogo         string
-		SPEntityID     string
-		Key            string
-		Hash           string
+		Values            map[string][]string
+		IdPDisplayName    map[string]string
+		IdPLogo           string
+		SPDisplayName     map[string]string
+		SPDescription     map[string]string
+		SPLogo            string
+		SPEntityID        string
+		Key               string
+		Hash              string
+		NoConsent         bool
+		ConsentAsAService string
 	}
 
 	Conf struct {
-		DiscoveryService         string
-		Domain                   string
-		HubEntityID              string
-		EptidSalt                string
-		HubRequestedAttributes   *goxml.Xp
-		Internal, External, Hub  gosaml.Md
-		SecureCookieHashKey      string
-		PostFormTemplate         string
-		AttributeReleaseTemplate string
-		Basic2uri                map[string]string
-		StdTiming                gosaml.IdAndTiming
-		ElementsToSign           []string
-		Certpath                 string
-		SSOServiceHandler        func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (string, string, error)
-		BirkHandler              func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (*goxml.Xp, *goxml.Xp, error)
-		AttributeHandler         func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (AttributeReleaseData, error)
+		DiscoveryService                       string
+		Domain                                 string
+		HubEntityID                            string
+		EptidSalt                              string
+		HubRequestedAttributes                 *goxml.Xp
+		Internal, ExternalIdP, ExternalSP, Hub gosaml.Md
+		SecureCookieHashKey                    string
+		PostFormTemplate                       string
+		AttributeReleaseTemplate               string
+		Basic2uri                              map[string]string
+		StdTiming                              gosaml.IdAndTiming
+		ElementsToSign                         []string
+		Certpath                               string
+		SSOServiceHandler                      func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (string, string, error)
+		BirkHandler                            func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (*goxml.Xp, *goxml.Xp, error)
+		ACSServiceHandler                      func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (AttributeReleaseData, error)
+		KribServiceHandler                     func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (string, error)
 	}
 )
 
 const (
-	idpCertQuery = `./md:IDPSSODescriptor/md:KeyDescriptor[@use="signing" or not(@use)]/ds:KeyInfo/ds:X509Data/ds:X509Certificate`
-	spCertQuery  = `./md:SPSSODescriptor/md:KeyDescriptor[@use="signing" or not(@use)]/ds:KeyInfo/ds:X509Data/ds:X509Certificate`
+	spCertQuery = `./md:SPSSODescriptor/md:KeyDescriptor[@use="signing" or not(@use)]/ds:KeyInfo/ds:X509Data/ds:X509Certificate`
 )
 
 var (
 	_ = log.Printf // For debugging; delete when done.
 	_ = fmt.Printf
-
-	contextmutex sync.RWMutex
-	context      = make(map[*http.Request]map[string]string)
-	debify       = regexp.MustCompile("^(https?://)(?:(?:birk|krib)\\.wayf.dk/(?:birk|krib)\\.php/)(.+)$")
 
 	postForm, attributeReleaseForm *template.Template
 	hashKey                        []byte
@@ -99,7 +95,7 @@ func Config(configuration Conf) {
 	attributeReleaseForm = template.Must(template.New("post").Parse(config.AttributeReleaseTemplate))
 }
 
-func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
+func SSOService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
 	request, spmd, hubmd, relayState, err := gosaml.ReceiveSAMLRequest(r, config.Internal, config.Hub)
 	if err != nil {
@@ -120,7 +116,7 @@ func SsoService(w http.ResponseWriter, r *http.Request) (err error) {
 		data.Set("entityID", entityID)
 		http.Redirect(w, r, config.DiscoveryService+data.Encode(), http.StatusFound)
 	} else {
-		idpmd, err := config.External.MDQ(idp)
+		idpmd, err := config.ExternalIdP.MDQ(idp)
 		if err != nil {
 			return err
 		}
@@ -151,7 +147,7 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// check ad-hoc feds overlab
 	defer r.Body.Close()
 	// get the sp as well to check for allowed acs
-	request, mdsp, mdbirkidp, relayState, err := gosaml.ReceiveSAMLRequest(r, config.External, config.External)
+	request, mdsp, mdbirkidp, relayState, err := gosaml.ReceiveSAMLRequest(r, config.ExternalSP, config.ExternalIdP)
 	if err != nil {
 		return
 	}
@@ -165,7 +161,8 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	newrequest := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), mdhub, mdidp)
+	// why not use orig request?
+	newrequest := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), request, mdhub, mdidp)
 
 	var privatekey []byte
 	passwd := "-"
@@ -190,7 +187,7 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	return
 }
 
-func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
+func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
 	birk, err := r.Cookie("BIRK")
 	if err != nil {
@@ -206,7 +203,11 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 	request := goxml.NewXp(string(gosaml.Inflate(value)))
 
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: "", Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
-	sp_md, err := config.External.MDQ(request.Query1(nil, "/samlp:AuthnRequest/saml:Issuer"))
+	sp_md, err := config.ExternalSP.MDQ(request.Query1(nil, "/samlp:AuthnRequest/saml:Issuer"))
+	if err != nil {
+		return
+	}
+	birkmd, err := config.ExternalIdP.MDQ(request.Query1(nil, "/samlp:AuthnRequest/@Destination"))
 	if err != nil {
 		return
 	}
@@ -216,18 +217,16 @@ func AcsService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	ard, err := config.AttributeHandler(idp_md, config.HubRequestedAttributes, sp_md, response)
+	ard, err := config.ACSServiceHandler(idp_md, config.HubRequestedAttributes, sp_md, request, response)
 	if err != nil {
 		return
 	}
 
-	birkmd, err := config.External.MDQ(request.Query1(nil, "/samlp:AuthnRequest/@Destination"))
-	if err != nil {
-		return
-	}
 	nameid := response.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
 	// respect nameID in req, give persistent id + all computed attributes + nameformat conversion
-	nameidformat := sp_md.Query1(nil, "./md:SPSSODescriptor/md:NameIDFormat")
+	// The reponse at this time contains a full attribute set
+	nameidformat := request.Query1(nil, "./samlp:NameIDPolicy/@Format")
+	fmt.Println("nameidformat", nameidformat)
 	if nameidformat == gosaml.Persistent {
 		response.QueryDashP(nameid, "@Format", gosaml.Persistent, nil)
 		eptid := response.Query1(nil, `./saml:Assertion/saml:AttributeStatement/saml:Attribute[@FriendlyName="eduPersonTargetedID"]/saml:AttributeValue`)
@@ -258,12 +257,16 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 	// check ad-hoc feds overlap
 	defer r.Body.Close()
 
-	response, _, _, relayState, err := gosaml.ReceiveSAMLResponse(r, config.External, config.External)
+	response, birkmd, kribmd, relayState, err := gosaml.ReceiveSAMLResponse(r, config.ExternalIdP, config.ExternalSP)
 	if err != nil {
 		return
 	}
 
-	destination := debify.ReplaceAllString(response.Query1(nil, "@Destination"), "$1$2")
+	destination, err := config.KribServiceHandler(response, birkmd, kribmd)
+	if err != nil {
+		return
+	}
+
 	response.QueryDashP(nil, "@Destination", destination, nil)
 	response.QueryDashP(nil, "./saml:Assertion/saml:Subject/saml:SubjectConfirmation/saml:SubjectConfirmationData/@Recipient", destination, nil)
 	issuer := config.HubEntityID
@@ -279,13 +282,13 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 	attributestatement := response.Query(nil, "./saml:Assertion/saml:AttributeStatement")[0]
 	for _, attr := range requestedattributes {
 		nameFormat, _ := attr.(types.Element).GetAttribute("NameFormat")
-		if nameFormat.NodeValue() == gosaml.Basic {
+		if nameFormat.NodeValue() == "urn:oasis:names:tc:SAML:2.0:attrname-format:basic" {
 			basicname, _ := attr.(types.Element).GetAttribute("Name")
 			uriname := config.Basic2uri[basicname.NodeValue()]
 			responseattribute := response.Query(attributestatement, "saml:Attribute[@Name='"+uriname+"']")
 			if len(responseattribute) > 0 {
 				responseattribute[0].(types.Element).SetAttribute("Name", basicname.NodeValue())
-				responseattribute[0].(types.Element).SetAttribute("NameFormat", gosaml.Basic)
+				responseattribute[0].(types.Element).SetAttribute("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
 			}
 		}
 	}
