@@ -217,33 +217,43 @@ func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	ard, err := config.ACSServiceHandler(idp_md, config.HubRequestedAttributes, sp_md, request, response)
-	if err != nil {
-		return
-	}
+	var newresponse *goxml.Xp
+	var ard AttributeReleaseData
+	if response.Query1(nil, `samlp:Status/samlp:StatusCode/@Value`) == "urn:oasis:names:tc:SAML:2.0:status:Success" {
+		ard, err = config.ACSServiceHandler(idp_md, config.HubRequestedAttributes, sp_md, request, response)
+		if err != nil {
+			return err
+		}
 
-	nameid := response.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
-	// respect nameID in req, give persistent id + all computed attributes + nameformat conversion
-	// The reponse at this time contains a full attribute set
-	nameidformat := request.Query1(nil, "./samlp:NameIDPolicy/@Format")
-	fmt.Println("nameidformat", nameidformat)
-	if nameidformat == gosaml.Persistent {
-		response.QueryDashP(nameid, "@Format", gosaml.Persistent, nil)
-		eptid := response.Query1(nil, `./saml:Assertion/saml:AttributeStatement/saml:Attribute[@FriendlyName="eduPersonTargetedID"]/saml:AttributeValue`)
-		response.QueryDashP(nameid, ".", eptid, nil)
-	} else if nameidformat == gosaml.Transient {
-		response.QueryDashP(nameid, ".", gosaml.Id(), nil)
-	}
+		nameid := response.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
+		// respect nameID in req, give persistent id + all computed attributes + nameformat conversion
+		// The reponse at this time contains a full attribute set
+		nameidformat := request.Query1(nil, "./samlp:NameIDPolicy/@Format")
+		fmt.Println("nameidformat", nameidformat)
+		if nameidformat == gosaml.Persistent {
+			response.QueryDashP(nameid, "@Format", gosaml.Persistent, nil)
+			eptid := response.Query1(nil, `./saml:Assertion/saml:AttributeStatement/saml:Attribute[@FriendlyName="eduPersonTargetedID"]/saml:AttributeValue`)
+			response.QueryDashP(nameid, ".", eptid, nil)
+		} else if nameidformat == gosaml.Transient {
+			response.QueryDashP(nameid, ".", gosaml.Id(), nil)
+		}
 
-	newresponse := gosaml.NewResponse(config.StdTiming.Refresh(), birkmd, sp_md, request, response)
+		newresponse = gosaml.NewResponse(config.StdTiming.Refresh(), birkmd, sp_md, request, response)
 
-	for _, q := range config.ElementsToSign {
-		err = gosaml.SignResponse(newresponse, q, birkmd)
+		for _, q := range config.ElementsToSign {
+			err = gosaml.SignResponse(newresponse, q, birkmd)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		newresponse = gosaml.NewErrorResponse(config.StdTiming.Refresh(), birkmd, sp_md, request, response)
+		err = gosaml.SignResponse(newresponse, "/samlp:Response", birkmd)
 		if err != nil {
 			return
 		}
+		ard = AttributeReleaseData{NoConsent: true}
 	}
-
 	// when consent as a service is ready - we will post to that
 	acs := newresponse.Query1(nil, "@Destination")
 
@@ -268,41 +278,51 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	response.QueryDashP(nil, "@Destination", destination, nil)
-	response.QueryDashP(nil, "./saml:Assertion/saml:Subject/saml:SubjectConfirmation/saml:SubjectConfirmationData/@Recipient", destination, nil)
 	issuer := config.HubEntityID
 	response.QueryDashP(nil, "./saml:Issuer", issuer, nil)
-	response.QueryDashP(nil, "./saml:Assertion/saml:Issuer", issuer, nil)
-	// Krib always receives attributes with nameformat=urn. Before sending to the real SP we need to look into
-	// the metadata for SP to determine the actual nameformat - as WAYF supports both for internal SPs.
-	mdsp, err := config.Internal.MDQ(destination)
-	if err != nil {
-		return
-	}
-	requestedattributes := mdsp.Query(nil, "./md:SPSSODescriptor/md:AttributeConsumingService/md:RequestedAttribute")
-	attributestatement := response.Query(nil, "./saml:Assertion/saml:AttributeStatement")[0]
-	for _, attr := range requestedattributes {
-		nameFormat, _ := attr.(types.Element).GetAttribute("NameFormat")
-		if nameFormat.NodeValue() == "urn:oasis:names:tc:SAML:2.0:attrname-format:basic" {
-			basicname, _ := attr.(types.Element).GetAttribute("Name")
-			uriname := config.Basic2uri[basicname.NodeValue()]
-			responseattribute := response.Query(attributestatement, "saml:Attribute[@Name='"+uriname+"']")
-			if len(responseattribute) > 0 {
-				responseattribute[0].(types.Element).SetAttribute("Name", basicname.NodeValue())
-				responseattribute[0].(types.Element).SetAttribute("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
-			}
-		}
-	}
 
 	mdhub, err := config.Hub.MDQ(config.HubEntityID)
 	if err != nil {
-		return
+		return err
 	}
 
-	for _, q := range config.ElementsToSign {
-		err = gosaml.SignResponse(response, q, mdhub)
+	if response.Query1(nil, `samlp:Status/samlp:StatusCode/@Value`) == "urn:oasis:names:tc:SAML:2.0:status:Success" {
+
+		response.QueryDashP(nil, "./saml:Assertion/saml:Issuer", issuer, nil)
+		// Krib always receives attributes with nameformat=urn. Before sending to the real SP we need to look into
+		// the metadata for SP to determine the actual nameformat - as WAYF supports both for internal SPs.
+		response.QueryDashP(nil, "./saml:Assertion/saml:Subject/saml:SubjectConfirmation/saml:SubjectConfirmationData/@Recipient", destination, nil)
+		mdsp, err := config.Internal.MDQ(destination)
+		if err != nil {
+			return err
+		}
+		requestedattributes := mdsp.Query(nil, "./md:SPSSODescriptor/md:AttributeConsumingService/md:RequestedAttribute")
+		attributestatement := response.Query(nil, "./saml:Assertion/saml:AttributeStatement")[0]
+		for _, attr := range requestedattributes {
+			nameFormat, _ := attr.(types.Element).GetAttribute("NameFormat")
+			if nameFormat.NodeValue() == "urn:oasis:names:tc:SAML:2.0:attrname-format:basic" {
+				basicname, _ := attr.(types.Element).GetAttribute("Name")
+				uriname := config.Basic2uri[basicname.NodeValue()]
+				responseattribute := response.Query(attributestatement, "saml:Attribute[@Name='"+uriname+"']")
+				if len(responseattribute) > 0 {
+					responseattribute[0].(types.Element).SetAttribute("Name", basicname.NodeValue())
+					responseattribute[0].(types.Element).SetAttribute("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
+				}
+			}
+		}
+
+		for _, q := range config.ElementsToSign {
+			err = gosaml.SignResponse(response, q, mdhub)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		err = gosaml.SignResponse(response, "/samlp:Response", mdhub)
 		if err != nil {
 			return
 		}
+		fmt.Println("after sign", response.PP())
 	}
 
 	data := formdata{Acs: destination, Samlresponse: base64.StdEncoding.EncodeToString([]byte(response.Doc.Dump(false))), RelayState: relayState}
