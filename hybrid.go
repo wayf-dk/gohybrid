@@ -212,7 +212,7 @@ func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 
-	response, idp_md, _, relayState, err := gosaml.ReceiveSAMLResponse(r, config.Internal, config.Hub)
+	response, idp_md, hub_md, relayState, err := gosaml.ReceiveSAMLResponse(r, config.Internal, config.Hub)
 	if err != nil {
 		return
 	}
@@ -225,20 +225,19 @@ func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 			return err
 		}
 
-		nameid := response.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
+		newresponse = gosaml.NewResponse(config.StdTiming.Refresh(), birkmd, sp_md, request, response)
+
+		nameid := newresponse.Query(nil, "./saml:Assertion/saml:Subject/saml:NameID")[0]
 		// respect nameID in req, give persistent id + all computed attributes + nameformat conversion
 		// The reponse at this time contains a full attribute set
 		nameidformat := request.Query1(nil, "./samlp:NameIDPolicy/@Format")
-		fmt.Println("nameidformat", nameidformat)
 		if nameidformat == gosaml.Persistent {
-			response.QueryDashP(nameid, "@Format", gosaml.Persistent, nil)
-			eptid := response.Query1(nil, `./saml:Assertion/saml:AttributeStatement/saml:Attribute[@FriendlyName="eduPersonTargetedID"]/saml:AttributeValue`)
-			response.QueryDashP(nameid, ".", eptid, nil)
+			newresponse.QueryDashP(nameid, "@Format", gosaml.Persistent, nil)
+			eptid := newresponse.Query1(nil, `./saml:Assertion/saml:AttributeStatement/saml:Attribute[@FriendlyName="eduPersonTargetedID"]/saml:AttributeValue`)
+			newresponse.QueryDashP(nameid, ".", eptid, nil)
 		} else if nameidformat == gosaml.Transient {
-			response.QueryDashP(nameid, ".", gosaml.Id(), nil)
+			newresponse.QueryDashP(nameid, ".", gosaml.Id(), nil)
 		}
-
-		newresponse = gosaml.NewResponse(config.StdTiming.Refresh(), birkmd, sp_md, request, response)
 
 		for _, q := range config.ElementsToSign {
 			err = gosaml.SignResponse(newresponse, q, birkmd)
@@ -246,6 +245,11 @@ func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 				return err
 			}
 		}
+
+		if _, err = SLOInfoHandler(w, r, response, newresponse, hub_md, "BIRK-SLO"); err != nil {
+			return
+		}
+
 	} else {
 		newresponse = gosaml.NewErrorResponse(config.StdTiming.Refresh(), birkmd, sp_md, request, response)
 		err = gosaml.SignResponse(newresponse, "/samlp:Response", birkmd)
@@ -254,6 +258,7 @@ func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 		}
 		ard = AttributeReleaseData{NoConsent: true}
 	}
+
 	// when consent as a service is ready - we will post to that
 	acs := newresponse.Query1(nil, "@Destination")
 
@@ -287,6 +292,9 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	if response.Query1(nil, `samlp:Status/samlp:StatusCode/@Value`) == "urn:oasis:names:tc:SAML:2.0:status:Success" {
+		if _, err = SLOInfoHandler(w, r, response, response, kribmd, "KRIB-SLO"); err != nil {
+			return err
+		}
 
 		response.QueryDashP(nil, "./saml:Assertion/saml:Issuer", issuer, nil)
 		// Krib always receives attributes with nameformat=urn. Before sending to the real SP we need to look into
@@ -322,10 +330,128 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 		if err != nil {
 			return
 		}
-		fmt.Println("after sign", response.PP())
 	}
 
 	data := formdata{Acs: destination, Samlresponse: base64.StdEncoding.EncodeToString([]byte(response.Doc.Dump(false))), RelayState: relayState}
 	postForm.Execute(w, data)
+	return
+}
+
+func BirkSLOService(w http.ResponseWriter, r *http.Request) (err error) {
+	return SLOService(w, r, config.ExternalSP, config.ExternalIdP, config.Hub, config.Internal, "BIRK-SLO")
+}
+
+func KribSLOService(w http.ResponseWriter, r *http.Request) (err error) {
+	return SLOService(w, r, config.ExternalIdP, config.ExternalSP, config.Hub, config.Internal, "KRIB-SLO")
+}
+
+func SPSLOService(w http.ResponseWriter, r *http.Request) (err error) {
+	return SLOService(w, r, config.Internal, config.Hub, config.ExternalIdP, config.ExternalSP, "BIRK-SLO")
+}
+
+func IdPSLOService(w http.ResponseWriter, r *http.Request) (err error) {
+	return SLOService(w, r, config.Internal, config.Hub, config.ExternalSP, config.ExternalIdP, "KRIB-SLO")
+}
+
+func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destinationMdSet, finalIssuerMdSet, finalDestinationMdSet gosaml.Md, tag string) (err error) {
+	defer r.Body.Close()
+	r.ParseForm()
+	if _, ok := r.Form["SAMLRequest"]; ok {
+		request, issuer, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, "SAMLRequest")
+		if err != nil {
+			return err
+		}
+		sloinfo, _ := SLOInfoHandler(w, r, request, request, nil, tag)
+		fmt.Println("sloinfo2", sloinfo)
+		if sloinfo.NameID != "" {
+			finaldestination, err := finalDestinationMdSet.MDQ(sloinfo.EntityID)
+			if err != nil {
+				return err
+			}
+			newRequest := gosaml.NewLogoutRequest(config.StdTiming.Refresh(), issuer, finaldestination, request, sloinfo)
+			// send LogoutRequest to sloinfo.EntityID med sloinfo.NameID as nameid
+			fmt.Println("new slo req", request.PP(), newRequest.PP())
+			cookievalue, err := seccookie.Encode(tag+"-REQ", gosaml.Deflate(request.Doc.Dump(true)))
+			http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
+			u, _ := gosaml.SAMLRequest2Url(newRequest, relayState, "", "", "")
+			http.Redirect(w, r, u.String(), http.StatusFound)
+		} else {
+			err = fmt.Errorf("no Logout info found")
+		}
+	} else if _, ok := r.Form["SAMLResponse"]; ok {
+		response, _, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, "SAMLResponse")
+		if err != nil {
+			return err
+		}
+		cookieValue, err := r.Cookie(tag + "-REQ")
+		if err != nil {
+			return err
+		}
+		value := []byte{}
+		if err = seccookie.Decode(tag+"-REQ", cookieValue.Value, &value); err != nil {
+			return err
+		}
+		http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: "", Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
+
+		// we checked the request when we received in birkService - we can use it without fear ie. we just parse it
+		request := goxml.NewXp(string(gosaml.Inflate(value)))
+		issuermd, _ := finalIssuerMdSet.MDQ(request.Query1(nil, "@Destination"))
+		destinationmd, _ := finalDestinationMdSet.MDQ(request.Query1(nil, "./saml:Issuer"))
+
+		newResponse := gosaml.NewLogoutResponse(config.StdTiming.Refresh(), issuermd, destinationmd, request, response)
+
+		fmt.Println("logoutresponse", response.PP(), request.PP(), newResponse.PP())
+		u, _ := gosaml.SAMLRequest2Url(newResponse, relayState, "", "", "")
+		http.Redirect(w, r, u.String(), http.StatusFound)
+		// forward the LogoutResponse to orig sender
+	} else {
+		err = fmt.Errorf("no LogoutRequest/logoutResponse found")
+	}
+	return
+}
+
+// Saves or retrieves the SLO info relevant to the contents of the samlMessage
+// For now uses cookies to keep the SLOInfo
+func SLOInfoHandler(w http.ResponseWriter, r *http.Request, samlIn, samlOut, destination *goxml.Xp, tag string) (sloinfo gosaml.SLOInfo, err error) {
+	SLOInfoMap := map[string]gosaml.SLOInfo{}
+	//value := []byte{}
+	slocookie, err := r.Cookie(tag)
+	if err == nil && slocookie.Value != "" {
+		sloInfoJson, _ := base64.StdEncoding.DecodeString(slocookie.Value)
+		//    	if err = seccookie.Decode("SLO", sloinfo.Value, &value); err != nil {
+		//	    	return
+		//	    }
+		if err = json.Unmarshal(sloInfoJson, &SLOInfoMap); err != nil {
+			return
+		}
+	} else {
+		err = nil
+	}
+	fmt.Println("sloinfo enter", tag, SLOInfoMap)
+
+	switch samlIn.QueryString(nil, "local-name(/*)") {
+	case "LogoutRequest":
+		// get the info
+		var ok bool
+		nameIDHash := gosaml.NameIDHash(samlOut)
+		fmt.Println("nameID", nameIDHash)
+		if sloinfo, ok = SLOInfoMap[nameIDHash]; ok {
+			delete(SLOInfoMap, nameIDHash)
+		}
+	case "LogoutResponse":
+		// needed at all ???
+	case "Response":
+		// save the info
+		SLOInfoMap[gosaml.NameIDHash(samlOut)] = gosaml.NewSLOInfo(samlIn, destination)
+	}
+	cookieBytes, _ := json.Marshal(SLOInfoMap)
+	cookieValue := base64.StdEncoding.EncodeToString(cookieBytes)
+	maxage := 8 * 3600
+	if cookieValue == "e30=" { // empty json object
+		maxage = -1
+	}
+	fmt.Println("sloinfo exit", tag, SLOInfoMap)
+	//  	cookievalue, err := seccookie.Encode("SLO", gosaml.Deflate())
+	http.SetCookie(w, &http.Cookie{Name: tag, Domain: "wayf.dk", Value: cookieValue, Path: "/", Secure: true, HttpOnly: true, MaxAge: maxage})
 	return
 }
