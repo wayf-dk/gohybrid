@@ -97,7 +97,7 @@ func Config(configuration Conf) {
 
 func SSOService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
-	request, spmd, hubmd, relayState, err := gosaml.ReceiveSAMLRequest(r, config.Internal, config.Hub)
+	request, spmd, hubmd, relayState, err := gosaml.ReceiveAuthnRequest(r, config.Internal, config.Hub)
 	if err != nil {
 		return
 	}
@@ -147,7 +147,7 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// check ad-hoc feds overlab
 	defer r.Body.Close()
 	// get the sp as well to check for allowed acs
-	request, mdsp, mdbirkidp, relayState, err := gosaml.ReceiveSAMLRequest(r, config.ExternalSP, config.ExternalIdP)
+	request, mdsp, mdbirkidp, relayState, err := gosaml.ReceiveAuthnRequest(r, config.ExternalSP, config.ExternalIdP)
 	if err != nil {
 		return
 	}
@@ -338,48 +338,49 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 }
 
 func BirkSLOService(w http.ResponseWriter, r *http.Request) (err error) {
-	return SLOService(w, r, config.ExternalSP, config.ExternalIdP, config.Hub, config.Internal, "BIRK-SLO")
+	return SLOService(w, r, config.ExternalSP, config.ExternalIdP, config.Hub, config.Internal, gosaml.IdPRole, "BIRK-SLO")
 }
 
 func KribSLOService(w http.ResponseWriter, r *http.Request) (err error) {
-	return SLOService(w, r, config.ExternalIdP, config.ExternalSP, config.Hub, config.Internal, "KRIB-SLO")
+	return SLOService(w, r, config.ExternalIdP, config.ExternalSP, config.Hub, config.Internal, gosaml.SPRole, "KRIB-SLO")
 }
 
 func SPSLOService(w http.ResponseWriter, r *http.Request) (err error) {
-	return SLOService(w, r, config.Internal, config.Hub, config.ExternalIdP, config.ExternalSP, "BIRK-SLO")
+	return SLOService(w, r, config.Internal, config.Hub, config.ExternalIdP, config.ExternalSP, gosaml.SPRole, "BIRK-SLO")
 }
 
 func IdPSLOService(w http.ResponseWriter, r *http.Request) (err error) {
-	return SLOService(w, r, config.Internal, config.Hub, config.ExternalSP, config.ExternalIdP, "KRIB-SLO")
+	return SLOService(w, r, config.Internal, config.Hub, config.ExternalSP, config.ExternalIdP, gosaml.IdPRole, "KRIB-SLO")
 }
 
-func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destinationMdSet, finalIssuerMdSet, finalDestinationMdSet gosaml.Md, tag string) (err error) {
+func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destinationMdSet, finalIssuerMdSet, finalDestinationMdSet gosaml.Md, role int, tag string) (err error) {
 	defer r.Body.Close()
 	r.ParseForm()
 	if _, ok := r.Form["SAMLRequest"]; ok {
-		request, issuer, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, "SAMLRequest")
+		request, issuer, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, role)
 		if err != nil {
 			return err
 		}
 		sloinfo, _ := SLOInfoHandler(w, r, request, request, nil, tag)
-		fmt.Println("sloinfo2", sloinfo)
 		if sloinfo.NameID != "" {
 			finaldestination, err := finalDestinationMdSet.MDQ(sloinfo.EntityID)
 			if err != nil {
 				return err
 			}
 			newRequest := gosaml.NewLogoutRequest(config.StdTiming.Refresh(), issuer, finaldestination, request, sloinfo)
+			if !request.QueryBool(nil, "boolean(./samlp:Extensions/aslo:Asynchronous)") {
+			    cookievalue, _ := seccookie.Encode(tag+"-REQ", gosaml.Deflate(request.Doc.Dump(true)))
+			    http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
+			 }
 			// send LogoutRequest to sloinfo.EntityID med sloinfo.NameID as nameid
-			fmt.Println("new slo req", request.PP(), newRequest.PP())
-			cookievalue, err := seccookie.Encode(tag+"-REQ", gosaml.Deflate(request.Doc.Dump(true)))
-			http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
 			u, _ := gosaml.SAMLRequest2Url(newRequest, relayState, "", "", "")
 			http.Redirect(w, r, u.String(), http.StatusFound)
 		} else {
 			err = fmt.Errorf("no Logout info found")
+			return err
 		}
 	} else if _, ok := r.Form["SAMLResponse"]; ok {
-		response, _, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, "SAMLResponse")
+		response, _, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, role)
 		if err != nil {
 			return err
 		}
@@ -400,12 +401,12 @@ func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destination
 
 		newResponse := gosaml.NewLogoutResponse(config.StdTiming.Refresh(), issuermd, destinationmd, request, response)
 
-		fmt.Println("logoutresponse", response.PP(), request.PP(), newResponse.PP())
 		u, _ := gosaml.SAMLRequest2Url(newResponse, relayState, "", "", "")
 		http.Redirect(w, r, u.String(), http.StatusFound)
 		// forward the LogoutResponse to orig sender
 	} else {
 		err = fmt.Errorf("no LogoutRequest/logoutResponse found")
+		return err
 	}
 	return
 }
@@ -417,24 +418,23 @@ func SLOInfoHandler(w http.ResponseWriter, r *http.Request, samlIn, samlOut, des
 	//value := []byte{}
 	slocookie, err := r.Cookie(tag)
 	if err == nil && slocookie.Value != "" {
-		sloInfoJson, _ := base64.StdEncoding.DecodeString(slocookie.Value)
-		//    	if err = seccookie.Decode("SLO", sloinfo.Value, &value); err != nil {
-		//	    	return
-		//	    }
-		if err = json.Unmarshal(sloInfoJson, &SLOInfoMap); err != nil {
+//		sloInfoJson, _ := base64.StdEncoding.DecodeString(slocookie.Value)
+		sloInfoJson := []byte{}
+        if err = seccookie.Decode(tag, slocookie.Value, &sloInfoJson); err != nil {
+            return
+        }
+		if err = json.Unmarshal(gosaml.Inflate(sloInfoJson), &SLOInfoMap); err != nil {
 			return
 		}
 	} else {
 		err = nil
 	}
-	fmt.Println("sloinfo enter", tag, SLOInfoMap)
 
 	switch samlIn.QueryString(nil, "local-name(/*)") {
 	case "LogoutRequest":
 		// get the info
 		var ok bool
 		nameIDHash := gosaml.NameIDHash(samlOut)
-		fmt.Println("nameID", nameIDHash)
 		if sloinfo, ok = SLOInfoMap[nameIDHash]; ok {
 			delete(SLOInfoMap, nameIDHash)
 		}
@@ -445,13 +445,12 @@ func SLOInfoHandler(w http.ResponseWriter, r *http.Request, samlIn, samlOut, des
 		SLOInfoMap[gosaml.NameIDHash(samlOut)] = gosaml.NewSLOInfo(samlIn, destination)
 	}
 	cookieBytes, _ := json.Marshal(SLOInfoMap)
-	cookieValue := base64.StdEncoding.EncodeToString(cookieBytes)
+	cookieValue := string(cookieBytes) //base64.StdEncoding.EncodeToString(cookieBytes)
 	maxage := 8 * 3600
-	if cookieValue == "e30=" { // empty json object
+	if cookieValue == "{}" { // empty json object
 		maxage = -1
 	}
-	fmt.Println("sloinfo exit", tag, SLOInfoMap)
-	//  	cookievalue, err := seccookie.Encode("SLO", gosaml.Deflate())
+	cookieValue, err = seccookie.Encode(tag, gosaml.Deflate(cookieValue))
 	http.SetCookie(w, &http.Cookie{Name: tag, Domain: "wayf.dk", Value: cookieValue, Path: "/", Secure: true, HttpOnly: true, MaxAge: maxage})
 	return
 }
