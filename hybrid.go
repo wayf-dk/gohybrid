@@ -180,7 +180,10 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	// why not use orig request?
-	newrequest := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), request, mdhub, mdidp)
+	newrequest, err := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), request, mdhub, mdidp)
+	if err != nil {
+		return
+	}
 
 	var privatekey []byte
 	passwd := "-"
