@@ -28,6 +28,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 )
 
 type (
@@ -66,10 +70,11 @@ type (
 		StdTiming                              gosaml.IdAndTiming
 		ElementsToSign                         []string
 		Certpath                               string
-		SSOServiceHandler                      func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (string, string, error)
+		SSOServiceHandler                      func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (string, string, string, error)
 		BirkHandler                            func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (*goxml.Xp, *goxml.Xp, error)
 		ACSServiceHandler                      func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (AttributeReleaseData, error)
 		KribServiceHandler                     func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (string, error)
+		DeKribify                              func(string) string
 	}
 )
 
@@ -102,7 +107,13 @@ func SSOService(w http.ResponseWriter, r *http.Request) (err error) {
 		return
 	}
 	entityID := spmd.Query1(nil, "@entityID")
-	idp := spmd.Query1(nil, "//IDPList/ProviderID") // Need to find a place for IDPList
+	idp := spmd.Query1(nil, "./md:Extensions/wayf:wayf/wayf:IDPList")
+	// how to fix this - in metadata ???
+	if idp != "" && !strings.HasPrefix(idp, "https://birk.wayf.dk/birk.php/") {
+		bify := regexp.MustCompile("^(https?://)(.*)$")
+		idp = bify.ReplaceAllString(idp, "${1}birk.wayf.dk/birk.php/$2")
+	}
+
 	if idp == "" {
 		idp = request.Query1(nil, "IDPList/ProviderID")
 	}
@@ -121,7 +132,7 @@ func SSOService(w http.ResponseWriter, r *http.Request) (err error) {
 			return err
 		}
 
-		kribID, acsurl, err := config.SSOServiceHandler(request, spmd, hubmd, idpmd)
+		kribID, acsurl, ssourl, err := config.SSOServiceHandler(request, spmd, hubmd, idpmd)
 		if err != nil {
 			return err
 		}
@@ -129,12 +140,7 @@ func SSOService(w http.ResponseWriter, r *http.Request) (err error) {
 		request.QueryDashP(nil, "/saml:Issuer", kribID, nil)
 		request.QueryDashP(nil, "@AssertionConsumerServiceURL", acsurl, nil)
 
-		const ssoquery = "./md:IDPSSODescriptor/md:SingleSignOnService[@Binding='urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect']/@Location"
-		ssoservice := idpmd.Query1(nil, ssoquery)
-		if ssoservice == "" {
-
-		}
-		request.QueryDashP(nil, "@Destination", ssoservice, nil)
+		request.QueryDashP(nil, "@Destination", ssourl, nil)
 		u, _ := gosaml.SAMLRequest2Url(request, relayState, "", "", "")
 		http.Redirect(w, r, u.String(), http.StatusFound)
 	}
@@ -147,12 +153,24 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// check ad-hoc feds overlab
 	defer r.Body.Close()
 	// get the sp as well to check for allowed acs
+	var directToSP bool
 	request, mdsp, mdbirkidp, relayState, err := gosaml.ReceiveAuthnRequest(r, config.ExternalSP, config.ExternalIdP)
+	// is this a request from KRIB?
 	if err != nil {
-		return
+		e, ok := err.(goxml.Werror)
+		if ok && e.Cause == gosaml.ACSError {
+			request, mdsp, mdbirkidp, relayState, err = gosaml.ReceiveAuthnRequest(r, config.Internal, config.ExternalIdP)
+		}
+		if err != nil {
+			return
+		}
+		// If we get here we need to tag the request as a direct BIRK to SP - otherwise we will end up sending the response to KRIB
+		directToSP = true
 	}
-	// Save the issuer and destination in a cookie for when the response comes back
 
+	request.QueryDashP(nil, "./@DirectToSP", strconv.FormatBool(directToSP), nil)
+
+	// Save the request in a cookie for when the response comes back
 	cookievalue, err := seccookie.Encode("BIRK", gosaml.Deflate(request.Doc.Dump(true)))
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
 
@@ -203,11 +221,22 @@ func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 	request := goxml.NewXp(string(gosaml.Inflate(value)))
 
 	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: "", Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
-	sp_md, err := config.ExternalSP.MDQ(request.Query1(nil, "/samlp:AuthnRequest/saml:Issuer"))
+	directToSP := request.Query1(nil, "./@DirectToSP") == "true"
+	spMetadataSet := config.ExternalSP
+	if directToSP {
+		spMetadataSet = config.Internal
+	}
+
+	sp_md, err := spMetadataSet.MDQ(request.Query1(nil, "/samlp:AuthnRequest/saml:Issuer"))
 	if err != nil {
 		return
 	}
-	birkmd, err := config.ExternalIdP.MDQ(request.Query1(nil, "/samlp:AuthnRequest/@Destination"))
+	var birkmd *goxml.Xp
+	if directToSP {
+		birkmd, err = config.Hub.MDQ(config.HubEntityID)
+	} else {
+		birkmd, err = config.ExternalIdP.MDQ(request.Query1(nil, "/samlp:AuthnRequest/@Destination"))
+	}
 	if err != nil {
 		return
 	}
@@ -238,6 +267,8 @@ func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 		} else if nameidformat == gosaml.Transient {
 			newresponse.QueryDashP(nameid, ".", gosaml.Id(), nil)
 		}
+
+		handleAttributeNameFormat(newresponse, sp_md)
 
 		for _, q := range config.ElementsToSign {
 			err = gosaml.SignResponse(newresponse, q, birkmd)
@@ -304,20 +335,8 @@ func KribService(w http.ResponseWriter, r *http.Request) (err error) {
 		if err != nil {
 			return err
 		}
-		requestedattributes := mdsp.Query(nil, "./md:SPSSODescriptor/md:AttributeConsumingService/md:RequestedAttribute")
-		attributestatement := response.Query(nil, "./saml:Assertion/saml:AttributeStatement")[0]
-		for _, attr := range requestedattributes {
-			nameFormat, _ := attr.(types.Element).GetAttribute("NameFormat")
-			if nameFormat.NodeValue() == "urn:oasis:names:tc:SAML:2.0:attrname-format:basic" {
-				basicname, _ := attr.(types.Element).GetAttribute("Name")
-				uriname := config.Basic2uri[basicname.NodeValue()]
-				responseattribute := response.Query(attributestatement, "saml:Attribute[@Name='"+uriname+"']")
-				if len(responseattribute) > 0 {
-					responseattribute[0].(types.Element).SetAttribute("Name", basicname.NodeValue())
-					responseattribute[0].(types.Element).SetAttribute("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
-				}
-			}
-		}
+
+		handleAttributeNameFormat(response, mdsp)
 
 		for _, q := range config.ElementsToSign {
 			err = gosaml.SignResponse(response, q, mdhub)
@@ -354,10 +373,12 @@ func IdPSLOService(w http.ResponseWriter, r *http.Request) (err error) {
 }
 
 func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destinationMdSet, finalIssuerMdSet, finalDestinationMdSet gosaml.Md, role int, tag string) (err error) {
+	req := []string{"idpreq", "spreq"}
+	res := []string{"idpres", "spres"}
 	defer r.Body.Close()
 	r.ParseForm()
 	if _, ok := r.Form["SAMLRequest"]; ok {
-		request, issuer, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, role)
+		request, issuer, destination, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, role)
 		if err != nil {
 			return err
 		}
@@ -368,11 +389,13 @@ func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destination
 				return err
 			}
 			newRequest := gosaml.NewLogoutRequest(config.StdTiming.Refresh(), issuer, finaldestination, request, sloinfo)
-			if !request.QueryBool(nil, "boolean(./samlp:Extensions/aslo:Asynchronous)") {
-			    cookievalue, _ := seccookie.Encode(tag+"-REQ", gosaml.Deflate(request.Doc.Dump(true)))
-			    http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
-			 }
+			async := request.QueryBool(nil, "boolean(./samlp:Extensions/aslo:Asynchronous)")
+			if !async {
+				cookievalue, _ := seccookie.Encode(tag+"-REQ", gosaml.Deflate(request.Doc.Dump(true)))
+				http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
+			}
 			// send LogoutRequest to sloinfo.EntityID med sloinfo.NameID as nameid
+			legacyStatLog("birk-99", "saml20-idp-SLO "+req[role], issuer.Query1(nil, "@entityID"), destination.Query1(nil, "@entityID"), sloinfo.NameID+fmt.Sprintf(" async:%t", async))
 			u, _ := gosaml.SAMLRequest2Url(newRequest, relayState, "", "", "")
 			http.Redirect(w, r, u.String(), http.StatusFound)
 		} else {
@@ -380,7 +403,7 @@ func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destination
 			return err
 		}
 	} else if _, ok := r.Form["SAMLResponse"]; ok {
-		response, _, _, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, role)
+		response, issuer, destination, relayState, err := gosaml.ReceiveLogoutMessage(r, issuerMdSet, destinationMdSet, role)
 		if err != nil {
 			return err
 		}
@@ -393,6 +416,7 @@ func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destination
 			return err
 		}
 		http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: "", Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
+		legacyStatLog("birk-99", "saml20-idp-SLO "+res[role], issuer.Query1(nil, "@entityID"), destination.Query1(nil, "@entityID"), "")
 
 		// we checked the request when we received in birkService - we can use it without fear ie. we just parse it
 		request := goxml.NewXp(string(gosaml.Inflate(value)))
@@ -418,11 +442,11 @@ func SLOInfoHandler(w http.ResponseWriter, r *http.Request, samlIn, samlOut, des
 	//value := []byte{}
 	slocookie, err := r.Cookie(tag)
 	if err == nil && slocookie.Value != "" {
-//		sloInfoJson, _ := base64.StdEncoding.DecodeString(slocookie.Value)
+		//		sloInfoJson, _ := base64.StdEncoding.DecodeString(slocookie.Value)
 		sloInfoJson := []byte{}
-        if err = seccookie.Decode(tag, slocookie.Value, &sloInfoJson); err != nil {
-            return
-        }
+		if err = seccookie.Decode(tag, slocookie.Value, &sloInfoJson); err != nil {
+			return
+		}
 		if err = json.Unmarshal(gosaml.Inflate(sloInfoJson), &SLOInfoMap); err != nil {
 			return
 		}
@@ -453,4 +477,25 @@ func SLOInfoHandler(w http.ResponseWriter, r *http.Request, samlIn, samlOut, des
 	cookieValue, err = seccookie.Encode(tag, gosaml.Deflate(cookieValue))
 	http.SetCookie(w, &http.Cookie{Name: tag, Domain: "wayf.dk", Value: cookieValue, Path: "/", Secure: true, HttpOnly: true, MaxAge: maxage})
 	return
+}
+
+func legacyStatLog(server, tag, idp, sp, hash string) {
+	log.Printf("%s ssp-wayf[%s]: 5 STAT [%d] %s %s %s %s\n", server, "007", time.Now().UnixNano(), tag, idp, sp, hash)
+}
+
+func handleAttributeNameFormat(response, mdsp *goxml.Xp) {
+	requestedattributes := mdsp.Query(nil, "./md:SPSSODescriptor/md:AttributeConsumingService/md:RequestedAttribute")
+	attributestatement := response.Query(nil, "./saml:Assertion/saml:AttributeStatement")[0]
+	for _, attr := range requestedattributes {
+		nameFormat, _ := attr.(types.Element).GetAttribute("NameFormat")
+		if nameFormat.NodeValue() == "urn:oasis:names:tc:SAML:2.0:attrname-format:basic" {
+			basicname, _ := attr.(types.Element).GetAttribute("Name")
+			uriname := config.Basic2uri[basicname.NodeValue()]
+			responseattribute := response.Query(attributestatement, "saml:Attribute[@Name='"+uriname+"']")
+			if len(responseattribute) > 0 {
+				responseattribute[0].(types.Element).SetAttribute("Name", basicname.NodeValue())
+				responseattribute[0].(types.Element).SetAttribute("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
+			}
+		}
+	}
 }
