@@ -76,6 +76,14 @@ type (
 		KribServiceHandler                     func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (string, error)
 		DeKribify                              func(string) string
 		SLOStore                               gosaml.SLOInfoMap
+		Session                                HybridSession
+	}
+
+	HybridSession interface {
+	    Set(http.ResponseWriter, *http.Request, string, []byte) error
+	    Get(http.ResponseWriter, *http.Request, string) ([]byte, error)
+	    Del(http.ResponseWriter, *http.Request, string) error
+	    GetDel(http.ResponseWriter, *http.Request, string) ([]byte, error)
 	}
 )
 
@@ -116,7 +124,7 @@ func SSOService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	if idp == "" {
-		idp = request.Query1(nil, "IDPList/ProviderID")
+		idp = request.Query1(nil, "./samlp:Scoping/samlp:IDPList/samlp:IDPEntry/@ProviderID")
 	}
 	if idp == "" {
 		idp = r.URL.Query().Get("idpentityid")
@@ -153,13 +161,13 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// remember to add the Scoping element to inform the IdP of requesterID - if stated in metadata for the IdP
 	// check ad-hoc feds overlap
 	defer r.Body.Close()
-	// get the sp as well to check for allowed acs
 	var directToSP bool
 	request, mdsp, mdbirkidp, relayState, err := gosaml.ReceiveAuthnRequest(r, config.ExternalSP, config.ExternalIdP)
 	// is this a request from KRIB?
 	if err != nil {
 		e, ok := err.(goxml.Werror)
 		if ok && e.Cause == gosaml.ACSError {
+		    // or is it coming directly from a SP
 			request, mdsp, mdbirkidp, relayState, err = gosaml.ReceiveAuthnRequest(r, config.Internal, config.ExternalIdP)
 		}
 		if err != nil {
@@ -171,9 +179,8 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 
 	request.QueryDashP(nil, "./@DirectToSP", strconv.FormatBool(directToSP), nil)
 
-	// Save the request in a cookie for when the response comes back
-	cookievalue, err := seccookie.Encode("BIRK", gosaml.Deflate(request.Doc.Dump(true)))
-	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
+	// Save the request in a session for when the response comes back
+	config.Session.Set(w, r, "BIRK", []byte(request.Doc.Dump(true)))
 
 	mdhub, mdidp, err := config.BirkHandler(request, mdsp, mdbirkidp)
 	if err != nil {
@@ -181,7 +188,7 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	// why not use orig request?
-	newrequest, err := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), request, mdhub, mdidp)
+	newrequest, err := gosaml.NewAuthnRequest(config.StdTiming.Refresh(), request, mdhub, mdidp, "")
 	if err != nil {
 		return
 	}
@@ -211,20 +218,14 @@ func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 
 func ACSService(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
-	birk, err := r.Cookie("BIRK")
+	value, err := config.Session.GetDel(w, r, "BIRK")
 	if err != nil {
-		return err
-	}
-
-	value := []byte{}
-	if err = seccookie.Decode("BIRK", birk.Value, &value); err != nil {
-		return
+        return
 	}
 
 	// we checked the request when we received in birkService - we can use it without fear ie. we just parse it
-	request := goxml.NewXp(string(gosaml.Inflate(value)))
+	request := goxml.NewXp(string(value))
 
-	http.SetCookie(w, &http.Cookie{Name: "BIRK", Value: "", Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
 	directToSP := request.Query1(nil, "./@DirectToSP") == "true"
 	spMetadataSet := config.ExternalSP
 	if directToSP {
@@ -395,8 +396,7 @@ func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destination
 			newRequest := gosaml.NewLogoutRequest(config.StdTiming.Refresh(), issuer, finaldestination, request, sloinfo)
 			async := request.QueryBool(nil, "boolean(./samlp:Extensions/aslo:Asynchronous)")
 			if !async {
-				cookievalue, _ := seccookie.Encode(tag+"-REQ", gosaml.Deflate(request.Doc.Dump(true)))
-				http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: cookievalue, Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true})
+		    	config.Session.Set(w, r, tag+"-REQ", []byte(request.Doc.Dump(true)))
 			}
 			// send LogoutRequest to sloinfo.EntityID med sloinfo.NameID as nameid
 			legacyStatLog("birk-99", "saml20-idp-SLO "+req[role], issuer.Query1(nil, "@entityID"), destination.Query1(nil, "@entityID"), sloinfo.NameID+fmt.Sprintf(" async:%t", async))
@@ -411,19 +411,14 @@ func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destination
 		if err != nil {
 			return err
 		}
-		cookieValue, err := r.Cookie(tag + "-REQ")
+		value, err := config.Session.GetDel(w, r, tag+"-REQ")
 		if err != nil {
-			return err
+		    return err
 		}
-		value := []byte{}
-		if err = seccookie.Decode(tag+"-REQ", cookieValue.Value, &value); err != nil {
-			return err
-		}
-		http.SetCookie(w, &http.Cookie{Name: tag + "-REQ", Value: "", Domain: config.Domain, Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
 		legacyStatLog("birk-99", "saml20-idp-SLO "+res[role], issuer.Query1(nil, "@entityID"), destination.Query1(nil, "@entityID"), "")
 
 		// we checked the request when we received in birkService - we can use it without fear ie. we just parse it
-		request := goxml.NewXp(string(gosaml.Inflate(value)))
+		request := goxml.NewXp(string(value))
 		issuermd, _ := finalIssuerMdSet.MDQ(request.Query1(nil, "@Destination"))
 		destinationmd, _ := finalDestinationMdSet.MDQ(request.Query1(nil, "./saml:Issuer"))
 
