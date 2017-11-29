@@ -151,7 +151,7 @@ func SSOService(w http.ResponseWriter, r *http.Request) (err error) {
 func BirkService(w http.ResponseWriter, r *http.Request) (err error) {
 	// use incoming request for crafting the new one
 	// remember to add the Scoping element to inform the IdP of requesterID - if stated in metadata for the IdP
-	// check ad-hoc feds overlab
+	// check ad-hoc feds overlap
 	defer r.Body.Close()
 	// get the sp as well to check for allowed acs
 	var directToSP bool
