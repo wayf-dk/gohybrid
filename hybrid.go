@@ -75,6 +75,7 @@ type (
 		ACSServiceHandler                      func(*goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp, *goxml.Xp) (AttributeReleaseData, error)
 		KribServiceHandler                     func(*goxml.Xp, *goxml.Xp, *goxml.Xp) (string, error)
 		DeKribify                              func(string) string
+		SLOStore                               gosaml.SLOInfoMap
 	}
 )
 
@@ -440,45 +441,16 @@ func SLOService(w http.ResponseWriter, r *http.Request, issuerMdSet, destination
 
 // Saves or retrieves the SLO info relevant to the contents of the samlMessage
 // For now uses cookies to keep the SLOInfo
-func SLOInfoHandler(w http.ResponseWriter, r *http.Request, samlIn, samlOut, destination *goxml.Xp, tag string) (sloinfo gosaml.SLOInfo, err error) {
-	SLOInfoMap := map[string]gosaml.SLOInfo{}
-	//value := []byte{}
-	slocookie, err := r.Cookie(tag)
-	if err == nil && slocookie.Value != "" {
-		//		sloInfoJson, _ := base64.StdEncoding.DecodeString(slocookie.Value)
-		sloInfoJson := []byte{}
-		if err = seccookie.Decode(tag, slocookie.Value, &sloInfoJson); err != nil {
-			return
-		}
-		if err = json.Unmarshal(gosaml.Inflate(sloInfoJson), &SLOInfoMap); err != nil {
-			return
-		}
-	} else {
-		err = nil
-	}
-
+func SLOInfoHandler(w http.ResponseWriter, r *http.Request, samlIn, samlOut, destination *goxml.Xp, tag string) (sloinfo *gosaml.SLOInfo, err error) {
+	nameIDHash := gosaml.NameIDHash(samlOut, tag)
 	switch samlIn.QueryString(nil, "local-name(/*)") {
 	case "LogoutRequest":
-		// get the info
-		var ok bool
-		nameIDHash := gosaml.NameIDHash(samlOut)
-		if sloinfo, ok = SLOInfoMap[nameIDHash]; ok {
-			delete(SLOInfoMap, nameIDHash)
-		}
+		sloinfo = config.SLOStore.GetSLOInfo(w, r, nameIDHash)
 	case "LogoutResponse":
 		// needed at all ???
 	case "Response":
-		// save the info
-		SLOInfoMap[gosaml.NameIDHash(samlOut)] = gosaml.NewSLOInfo(samlIn, destination)
+		config.SLOStore.PutSLOInfo(w, r, nameIDHash, gosaml.NewSLOInfo(samlIn, destination))
 	}
-	cookieBytes, _ := json.Marshal(SLOInfoMap)
-	cookieValue := string(cookieBytes) //base64.StdEncoding.EncodeToString(cookieBytes)
-	maxage := 8 * 3600
-	if cookieValue == "{}" { // empty json object
-		maxage = -1
-	}
-	cookieValue, err = seccookie.Encode(tag, gosaml.Deflate(cookieValue))
-	http.SetCookie(w, &http.Cookie{Name: tag, Domain: "wayf.dk", Value: cookieValue, Path: "/", Secure: true, HttpOnly: true, MaxAge: maxage})
 	return
 }
 
